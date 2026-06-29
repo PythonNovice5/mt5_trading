@@ -36,7 +36,7 @@ MIN_RR             = 3.0     # Minimum RR to take the trade
 TARGET_RR          = 5.0     # Primary TP target
 
 # ── EXIT MANAGEMENT ──
-USE_TRAILING_SL    = True    # True = trail SL on M5 swing lows; False = fixed SL + TP only
+USE_TRAILING_SL    = False   # True = trail SL on M5 swing lows; False = fixed SL + TP only
 
 # ── CONSOLIDATION RECTANGLE ──
 RECT_MIN_CANDLES   = 5       # Min M5 candles to form a valid rectangle
