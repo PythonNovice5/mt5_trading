@@ -114,10 +114,12 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
         # ── WATCHING: detect inside bar ──────────────────────────────────────
         if state == "WATCHING":
+            mother_range = prev_m5["high"] - prev_m5["low"]
+            min_range    = pip_size(symbol) * 10  # minimum 10 pip mother bar
             if (candle["high"] < prev_m5["high"] and candle["low"] > prev_m5["low"]
-                    and prev_m5["close"] > prev_m5["open"]):  # mother bar must be bullish
+                    and mother_range >= min_range):
                 mother_bar = prev_m5
-                print(f"  → Inside bar | Mother {mother_bar['time']} H={round(mother_bar['high'],5)} L={round(mother_bar['low'],5)} | Inside {candle['time']}")
+                print(f"  → Inside bar | Mother {mother_bar['time']} H={round(mother_bar['high'],5)} L={round(mother_bar['low'],5)} Range={round(mother_range/pip_size(symbol),1)}p | Inside {candle['time']}")
                 state = "TRIGGERED"
             else:
                 prev_m5 = candle
