@@ -20,7 +20,7 @@ import numpy as np
 from config import (
     RSI_PERIOD, RSI_OVERSOLD, SETUP_WINDOW_BARS,
     SWING_LOOKBACK, TARGET_RR, FIXED_RISK_USD, USE_TRAILING_SL,
-    TRAIL_ACTIVATE_RR,
+    TRAIL_ACTIVATE_RR, MIN_SL_PIPS,
 )
 from indicators import calculate_rsi
 
@@ -132,8 +132,10 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         if state == "ARMED":
             if candle["high"] > marked_high:
                 entry_price = marked_high
-                sl_price    = marked_low
-                sl_distance = entry_price - sl_price
+                # Widen SL to the minimum distance if the marked candle is too small
+                min_dist    = MIN_SL_PIPS * pip_size(symbol)
+                sl_distance = max(entry_price - marked_low, min_dist)
+                sl_price    = entry_price - sl_distance
 
                 if sl_distance <= 0:
                     state = "WATCHING"

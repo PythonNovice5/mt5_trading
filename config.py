@@ -38,6 +38,7 @@ TARGET_RR          = 5.0     # Primary TP target
 # ── EXIT MANAGEMENT ──
 USE_TRAILING_SL    = True    # True = trail SL up to each completed M5 candle low; False = fixed SL + TP only
 TRAIL_ACTIVATE_RR  = 1.0     # Start trailing only after price reaches this R multiple (0 = trail from entry)
+MIN_SL_PIPS        = 5.0     # Minimum SL distance; widen SL to this if marked candle is smaller
 
 # ── CONSOLIDATION RECTANGLE ──
 RECT_MIN_CANDLES   = 5       # Min M5 candles to form a valid rectangle
