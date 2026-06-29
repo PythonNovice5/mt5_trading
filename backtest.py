@@ -94,15 +94,16 @@ def find_consolidation_rect(m5_candles: pd.DataFrame, min_candles: int, max_rang
 def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
     """
     Walk H1 bars. On RSI < oversold, activate setup.
-    Scan M5 from setup_time for consolidation rectangle + breakout.
-    Simulate trade with trailing SL walk-forward.
+    Each subsequent H1 bar = one 1-hour observation window on M5.
+    If M5 low breaks key_low → shift (max 7). If held → look for rect + entry.
     """
     h1 = h1.copy().reset_index(drop=True)
     m5 = m5.copy().reset_index(drop=True)
     h1["rsi"] = calculate_rsi(h1["close"], RSI_PERIOD)
 
+    MAX_SHIFTS = 7
     trades       = []
-    active_setup = None  # {key_low, setup_time, rsi}
+    active_setup = None  # {key_low, rsi, shifts, setup_bar}
 
     for h1_idx in range(RSI_PERIOD + 1, len(h1)):
         h1_candle     = h1.iloc[h1_idx]
@@ -110,45 +111,54 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         h1_open_time  = h1_candle["time"]
         h1_close_time = h1_open_time + pd.Timedelta(hours=1)
 
-        # ── RSI setup: create on first hit, update key_low on subsequent hits ──
+        # ── RSI setup ──
         if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
             tag = "NEW" if active_setup is None else "UPD"
             print(f"[RSI {tag}] {symbol} | {h1_open_time} | RSI={round(rsi_val,2)} | Close={h1_candle['close']} | Low={h1_candle['low']}")
             if active_setup is None:
                 active_setup = {
-                    "key_low":    h1_candle["low"],
-                    "setup_time": h1_close_time,
-                    "rsi":        round(rsi_val, 2),
+                    "key_low":   h1_candle["low"],
+                    "rsi":       round(rsi_val, 2),
+                    "shifts":    0,
+                    "setup_bar": h1_idx,
                 }
-            else:
-                active_setup["key_low"] = h1_candle["low"]
-                active_setup["rsi"]     = round(rsi_val, 2)
 
         if active_setup is None:
             continue
 
-        # ── Scan M5 from setup_time to current H1 close ──
-        m5_slice = m5[
-            (m5["time"] >= active_setup["setup_time"]) &
+        # Skip the bar that created the setup — observe from the NEXT bar
+        if h1_idx == active_setup["setup_bar"]:
+            continue
+
+        # ── Observe THIS H1 bar's M5 window only (12 candles) ──
+        m5_this_bar = m5[
+            (m5["time"] >= h1_open_time) &
             (m5["time"] <  h1_close_time)
         ].reset_index(drop=True)
 
-        if len(m5_slice) < RECT_MIN_CANDLES:
+        if len(m5_this_bar) == 0:
             continue
 
-        # Invalidate if key_low broken on M5
-        if m5_slice["low"].min() < active_setup["key_low"]:
-            print(f"  → Key low {active_setup['key_low']} breached — reset")
-            active_setup = None
+        # Key low broken → shift
+        if m5_this_bar["low"].min() < active_setup["key_low"]:
+            active_setup["shifts"] += 1
+            active_setup["key_low"] = m5_this_bar["low"].min()
+            print(f"  → Low broken — shift {active_setup['shifts']}/{MAX_SHIFTS} | new key_low={round(active_setup['key_low'], 5)}")
+            if active_setup["shifts"] >= MAX_SHIFTS:
+                print(f"  → Max shifts reached — abandon")
+                active_setup = None
             continue
 
-        # Find consolidation rectangle
-        rect = find_consolidation_rect(m5_slice, RECT_MIN_CANDLES, RECT_MAX_RANGE_PCT)
+        # Low held — look for consolidation rectangle in this hour
+        if len(m5_this_bar) < RECT_MIN_CANDLES:
+            continue
+
+        rect = find_consolidation_rect(m5_this_bar, RECT_MIN_CANDLES, RECT_MAX_RANGE_PCT)
         if rect is None:
             continue
 
-        # Scan M5 candles after rectangle end for breakout close above rect_high
-        m5_after_rect = m5_slice[m5_slice["time"] > rect["end_time"]].reset_index(drop=True)
+        # First M5 candle closing above rect_high after rect ends
+        m5_after_rect = m5_this_bar[m5_this_bar["time"] > rect["end_time"]].reset_index(drop=True)
         entry_candle = None
         for _, candle in m5_after_rect.iterrows():
             if candle["close"] > rect["rect_high"]:
@@ -185,19 +195,17 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         current_sl = sl_price
 
         for fwd_idx, row in m5_forward.iterrows():
-            # Check trailing SL
             if row["low"] <= current_sl:
                 result     = "SL"
                 exit_price = current_sl
                 exit_time  = row["time"]
                 break
-            # Check TP
             if row["high"] >= tp_price:
                 result     = "TP"
                 exit_price = tp_price
                 exit_time  = row["time"]
                 break
-            # Trail SL: confirm swing low SWING_LOOKBACK candles ago
+            # Trail SL to confirmed swing low (SWING_LOOKBACK candles each side)
             check_idx = fwd_idx - SWING_LOOKBACK
             if check_idx >= SWING_LOOKBACK:
                 candidate_low = m5_forward.iloc[check_idx]["low"]
