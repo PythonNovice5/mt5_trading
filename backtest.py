@@ -133,6 +133,13 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
         # ── TRIGGERED: wait for close above mother bar high ──────────────────
         if state == "TRIGGERED":
+            # New low below mother bar → setup invalidated, look for a lower one
+            if candle["low"] < mother_bar["low"]:
+                state = "WATCHING"
+                prev_m5 = candle
+                mother_bar = None
+                continue
+
             min_breakout = mother_bar["high"] + pip_size(symbol)
             if candle["close"] <= min_breakout:
                 continue
