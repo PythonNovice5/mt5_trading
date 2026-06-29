@@ -23,8 +23,9 @@ MAX_SPREAD_PIPS    = 20      # Skip trade if spread exceeds this
 
 # ── RSI SETUP (1H) ──
 RSI_PERIOD         = 14
-RSI_OVERSOLD       = 25      # 1H RSI must be below this to activate setup
-SETUP_EXPIRY_BARS  = 3       # Setup expires after this many 1H candles
+RSI_OVERSOLD       = 20      # 1H RSI must drop below this to activate setup
+RSI_SETUP_EXIT     = 30      # Setup abandoned when RSI rises back above this
+SETUP_EXPIRY_BARS  = 3       # (live bot only)
 
 # ── SWING DETECTION (5min) ──
 SWING_LOOKBACK     = 3       # Candles on each side to confirm a swing high/low

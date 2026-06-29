@@ -1,23 +1,27 @@
 """
-Backtester for the RSI mean-reversion strategy with consolidation rectangle entry.
-Uses CSV data downloaded via download_data_claud.py.
+Backtester — RSI mean-reversion with inside bar entry.
+
+Strategy:
+  1. H1 RSI < 20  → activate setup (switch to M5)
+  2. M5: look for inside bar (candle B fully inside candle A)
+  3. First M5 candle that closes above candle A's high  → entry
+     SL = candle A's low  |  TP = 1:5 RR  |  trail SL on M5 swing lows
+  4. Abandon if H1 RSI rises back above 30
 
 Usage:
-    python backtest.py                        # uses defaults in config
-    python backtest.py EURUSD H1 M5 1        # symbol, setup_tf, entry_tf, years
+    python backtest.py EURUSD H1 M5 1
 """
 
 import sys
 import os
 import pandas as pd
 import numpy as np
-from datetime import timedelta
 
 from config import (
-    RSI_PERIOD, RSI_OVERSOLD, SWING_LOOKBACK, MIN_RR, TARGET_RR,
-    FIXED_RISK_USD, MAX_OPEN_TRADES, RECT_MIN_CANDLES, RECT_MAX_RANGE_PCT,
+    RSI_PERIOD, RSI_OVERSOLD, RSI_SETUP_EXIT,
+    SWING_LOOKBACK, TARGET_RR, FIXED_RISK_USD,
 )
-from indicators import calculate_rsi, get_swing_low_levels
+from indicators import calculate_rsi
 
 
 # ── DATA LOADING ──────────────────────────────────────────────────────────────
@@ -42,207 +46,152 @@ def pips(distance: float, symbol: str) -> float:
     return round(distance / pip_size(symbol), 1)
 
 
-# ── CONSOLIDATION RECTANGLE DETECTION ────────────────────────────────────────
-
-def find_consolidation_rect(m5_candles: pd.DataFrame, min_candles: int, max_range_pct: float) -> dict | None:
-    """
-    Find first consolidation rectangle in m5_candles.
-    A rectangle is min_candles+ consecutive candles with high-low range <= max_range_pct.
-    Extends the rectangle while adding more candles keeps range within limit.
-    Returns {rect_high, rect_low, start_time, end_time, end_pos} or None.
-    """
-    n = len(m5_candles)
-    if n < min_candles:
-        return None
-
-    for start in range(n - min_candles + 1):
-        window = m5_candles.iloc[start:start + min_candles]
-        rect_high = window["high"].max()
-        rect_low  = window["low"].min()
-
-        if rect_low <= 0:
-            continue
-
-        if (rect_high - rect_low) / rect_low > max_range_pct:
-            continue
-
-        # Extend rectangle while range stays tight
-        end = start + min_candles
-        while end < n:
-            new_high = max(rect_high, m5_candles.iloc[end]["high"])
-            new_low  = min(rect_low,  m5_candles.iloc[end]["low"])
-            if (new_high - new_low) / new_low <= max_range_pct:
-                rect_high = new_high
-                rect_low  = new_low
-                end += 1
-            else:
-                break
-
-        return {
-            "rect_high":  rect_high,
-            "rect_low":   rect_low,
-            "start_time": m5_candles.iloc[start]["time"],
-            "end_time":   m5_candles.iloc[end - 1]["time"],
-            "end_pos":    end - 1,
-        }
-
-    return None
-
-
 # ── BACKTEST ENGINE ───────────────────────────────────────────────────────────
 
 def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
     """
-    Walk H1 bars. On RSI < oversold, activate setup.
-    Each subsequent H1 bar = one 1-hour observation window on M5.
-    If M5 low breaks key_low → shift (max 7). If held → look for rect + entry.
+    State machine on M5 candles:
+      INACTIVE  → WATCHING  : H1 RSI drops below RSI_OVERSOLD
+      WATCHING  → TRIGGERED : inside bar found on M5
+      TRIGGERED → trade     : M5 close above mother bar high
+      any state → INACTIVE  : H1 RSI rises above RSI_SETUP_EXIT
     """
     h1 = h1.copy().reset_index(drop=True)
     m5 = m5.copy().reset_index(drop=True)
     h1["rsi"] = calculate_rsi(h1["close"], RSI_PERIOD)
 
-    MAX_SHIFTS = 7
-    trades       = []
-    active_setup = None  # {key_low, rsi, shifts, setup_bar}
+    # Attach latest completed H1 RSI to each M5 candle
+    h1_rsi_df = h1[["time", "rsi"]].copy()
+    h1_rsi_df["time"] = h1_rsi_df["time"] + pd.Timedelta(hours=1)  # H1 close time
+    h1_rsi_df = h1_rsi_df.rename(columns={"rsi": "h1_rsi"})
 
-    for h1_idx in range(RSI_PERIOD + 1, len(h1)):
-        h1_candle     = h1.iloc[h1_idx]
-        rsi_val       = h1_candle["rsi"]
-        h1_open_time  = h1_candle["time"]
-        h1_close_time = h1_open_time + pd.Timedelta(hours=1)
+    m5 = pd.merge_asof(
+        m5.sort_values("time"),
+        h1_rsi_df.sort_values("time"),
+        on="time",
+        direction="backward",
+    ).reset_index(drop=True)
 
-        # ── RSI setup ──
-        if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
-            tag = "NEW" if active_setup is None else "UPD"
-            print(f"[RSI {tag}] {symbol} | {h1_open_time} | RSI={round(rsi_val,2)} | Close={h1_candle['close']} | Low={h1_candle['low']}")
-            if active_setup is None:
-                active_setup = {
-                    "key_low":   h1_candle["low"],
-                    "rsi":       round(rsi_val, 2),
-                    "shifts":    0,
-                    "setup_bar": h1_idx,
-                }
+    trades           = []
+    state            = "INACTIVE"   # INACTIVE | WATCHING | TRIGGERED
+    prev_m5          = None         # previous M5 candle (for inside bar check)
+    mother_bar       = None         # mother candle of inside bar
+    trade_open_until = None         # skip M5 candles during open trade
 
-        if active_setup is None:
+    for i in range(1, len(m5)):
+        candle  = m5.iloc[i]
+        h1_rsi  = candle["h1_rsi"]
+
+        if pd.isna(h1_rsi):
             continue
 
-        # Skip the bar that created the setup — observe from the NEXT bar
-        if h1_idx == active_setup["setup_bar"]:
+        # Skip candles covered by an open simulated trade
+        if trade_open_until is not None:
+            if candle["time"] <= trade_open_until:
+                continue
+            trade_open_until = None
+
+        # RSI back above exit threshold → abandon
+        if h1_rsi >= RSI_SETUP_EXIT:
+            if state != "INACTIVE":
+                print(f"  → RSI >= {RSI_SETUP_EXIT} — abandon | {candle['time']}")
+            state = "INACTIVE"
+            prev_m5 = mother_bar = None
             continue
 
-        # ── Observe THIS H1 bar's M5 window only (12 candles) ──
-        m5_this_bar = m5[
-            (m5["time"] >= h1_open_time) &
-            (m5["time"] <  h1_close_time)
-        ].reset_index(drop=True)
-
-        if len(m5_this_bar) == 0:
+        # RSI drops below entry threshold → activate
+        if h1_rsi < RSI_OVERSOLD and state == "INACTIVE":
+            print(f"[RSI ACTIVE] {symbol} | {candle['time']} | H1 RSI={round(h1_rsi, 2)}")
+            state   = "WATCHING"
+            prev_m5 = candle
             continue
 
-        # Key low broken → shift
-        if m5_this_bar["low"].min() < active_setup["key_low"]:
-            active_setup["shifts"] += 1
-            active_setup["key_low"] = m5_this_bar["low"].min()
-            print(f"  → Low broken — shift {active_setup['shifts']}/{MAX_SHIFTS} | new key_low={round(active_setup['key_low'], 5)}")
-            if active_setup["shifts"] >= MAX_SHIFTS:
-                print(f"  → Max shifts reached — abandon")
-                active_setup = None
+        if state == "INACTIVE":
             continue
 
-        # Low held — look for consolidation rectangle in this hour
-        if len(m5_this_bar) < RECT_MIN_CANDLES:
+        # ── WATCHING: detect inside bar ──────────────────────────────────────
+        if state == "WATCHING":
+            if candle["high"] < prev_m5["high"] and candle["low"] > prev_m5["low"]:
+                mother_bar = prev_m5
+                print(f"  → Inside bar | Mother {mother_bar['time']} H={round(mother_bar['high'],5)} L={round(mother_bar['low'],5)} | Inside {candle['time']}")
+                state = "TRIGGERED"
+            else:
+                prev_m5 = candle
             continue
 
-        rect = find_consolidation_rect(m5_this_bar, RECT_MIN_CANDLES, RECT_MAX_RANGE_PCT)
-        if rect is None:
-            continue
+        # ── TRIGGERED: wait for close above mother bar high ──────────────────
+        if state == "TRIGGERED":
+            if candle["close"] <= mother_bar["high"]:
+                continue
 
-        # First M5 candle closing above rect_high after rect ends
-        m5_after_rect = m5_this_bar[m5_this_bar["time"] > rect["end_time"]].reset_index(drop=True)
-        entry_candle = None
-        for _, candle in m5_after_rect.iterrows():
-            if candle["close"] > rect["rect_high"]:
-                entry_candle = candle
-                break
+            entry_price = candle["close"]
+            sl_price    = mother_bar["low"]
+            sl_distance = entry_price - sl_price
 
-        if entry_candle is None:
-            continue
+            if sl_distance <= 0:
+                state = "WATCHING"
+                prev_m5 = candle
+                mother_bar = None
+                continue
 
-        entry_price = entry_candle["close"]
-        sl_price    = rect["rect_low"]
-        sl_distance = entry_price - sl_price
+            tp_price       = entry_price + sl_distance * TARGET_RR
+            rr             = TARGET_RR
+            entry_time     = candle["time"]
+            saved_m_high   = mother_bar["high"]
+            saved_m_low    = mother_bar["low"]
 
-        if sl_distance <= 0:
-            active_setup = None
-            continue
+            print(f"  → ENTRY | {entry_time} | Entry={round(entry_price,5)} SL={round(sl_price,5)} TP={round(tp_price,5)}")
 
-        tp_price = entry_price + sl_distance * TARGET_RR
-        rr       = TARGET_RR
+            # Walk-forward simulation with trailing SL
+            m5_fwd     = m5.iloc[i + 1:].reset_index(drop=True)
+            result     = "OPEN"
+            exit_price = None
+            exit_time  = None
+            current_sl = sl_price
 
-        if rr < MIN_RR:
-            active_setup = None
-            continue
+            for fwd_idx, row in m5_fwd.iterrows():
+                if row["low"] <= current_sl:
+                    result = "SL"; exit_price = current_sl; exit_time = row["time"]; break
+                if row["high"] >= tp_price:
+                    result = "TP"; exit_price = tp_price;   exit_time = row["time"]; break
+                # Confirm swing low SWING_LOOKBACK candles ago and trail SL up
+                check_idx = fwd_idx - SWING_LOOKBACK
+                if check_idx >= SWING_LOOKBACK:
+                    cand  = m5_fwd.iloc[check_idx]["low"]
+                    left  = [m5_fwd.iloc[j]["low"] for j in range(check_idx - SWING_LOOKBACK, check_idx)]
+                    right = [m5_fwd.iloc[j]["low"] for j in range(check_idx + 1, check_idx + SWING_LOOKBACK + 1)]
+                    if all(cand < l for l in left) and all(cand < r for r in right) and cand > current_sl:
+                        current_sl = cand
+                        print(f"    → Trail SL → {round(current_sl,5)} at {m5_fwd.iloc[check_idx]['time']}")
 
-        print(f"  → ENTRY | {entry_candle['time']} | Entry={round(entry_price,5)} SL={round(sl_price,5)} TP={round(tp_price,5)} Rect=[{round(rect['rect_low'],5)},{round(rect['rect_high'],5)}]")
+            state = "INACTIVE"
+            prev_m5 = mother_bar = None
 
-        # ── Walk-forward trade simulation with trailing SL ──
-        entry_time = entry_candle["time"]
-        m5_forward = m5[m5["time"] > entry_time].reset_index(drop=True)
+            if result == "OPEN":
+                continue
 
-        result     = "OPEN"
-        exit_price = None
-        exit_time  = None
-        current_sl = sl_price
+            trade_open_until = exit_time
+            duration_mins    = int((exit_time - entry_time).total_seconds() / 60)
+            pnl_usd          = round(FIXED_RISK_USD * rr, 2) if result == "TP" else -FIXED_RISK_USD
 
-        for fwd_idx, row in m5_forward.iterrows():
-            if row["low"] <= current_sl:
-                result     = "SL"
-                exit_price = current_sl
-                exit_time  = row["time"]
-                break
-            if row["high"] >= tp_price:
-                result     = "TP"
-                exit_price = tp_price
-                exit_time  = row["time"]
-                break
-            # Trail SL to confirmed swing low (SWING_LOOKBACK candles each side)
-            check_idx = fwd_idx - SWING_LOOKBACK
-            if check_idx >= SWING_LOOKBACK:
-                candidate_low = m5_forward.iloc[check_idx]["low"]
-                left  = [m5_forward.iloc[j]["low"] for j in range(check_idx - SWING_LOOKBACK, check_idx)]
-                right = [m5_forward.iloc[j]["low"] for j in range(check_idx + 1, check_idx + SWING_LOOKBACK + 1)]
-                if all(candidate_low < l for l in left) and all(candidate_low < r for r in right):
-                    if candidate_low > current_sl:
-                        current_sl = candidate_low
-                        print(f"    → Trail SL → {round(current_sl,5)} at {m5_forward.iloc[check_idx]['time']}")
-
-        if result == "OPEN":
-            active_setup = None
-            continue
-
-        duration_mins = int((exit_time - entry_time).total_seconds() / 60)
-        pnl_usd       = round(FIXED_RISK_USD * rr, 2) if result == "TP" else -FIXED_RISK_USD
-
-        trades.append({
-            "symbol":        symbol,
-            "entry_time":    entry_time,
-            "exit_time":     exit_time,
-            "entry_price":   round(entry_price, 5),
-            "sl_price":      round(sl_price, 5),
-            "tp_price":      round(tp_price, 5),
-            "exit_price":    round(exit_price, 5),
-            "sl_pips":       pips(sl_distance, symbol),
-            "rr_planned":    rr,
-            "rr_achieved":   round((exit_price - entry_price) / sl_distance, 2),
-            "result":        result,
-            "pnl_usd":       pnl_usd,
-            "duration_mins": duration_mins,
-            "rsi_at_setup":  active_setup["rsi"],
-            "rect_high":     round(rect["rect_high"], 5),
-            "rect_low":      round(rect["rect_low"], 5),
-        })
-
-        active_setup = None
+            trades.append({
+                "symbol":        symbol,
+                "entry_time":    entry_time,
+                "exit_time":     exit_time,
+                "entry_price":   round(entry_price, 5),
+                "sl_price":      round(sl_price, 5),
+                "tp_price":      round(tp_price, 5),
+                "exit_price":    round(exit_price, 5),
+                "sl_pips":       pips(sl_distance, symbol),
+                "rr_planned":    rr,
+                "rr_achieved":   round((exit_price - entry_price) / sl_distance, 2),
+                "result":        result,
+                "pnl_usd":       pnl_usd,
+                "duration_mins": duration_mins,
+                "h1_rsi":        round(h1_rsi, 2),
+                "mother_high":   round(saved_m_high, 5),
+                "mother_low":    round(saved_m_low, 5),
+            })
 
     return trades
 
@@ -262,7 +211,7 @@ def compute_stats(trades: list[dict]) -> dict:
     gross_loss    = abs(losses["pnl_usd"].sum()) if len(losses) else 0
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else float("inf")
 
-    equity = FIXED_RISK_USD * 400  # $5000 starting balance
+    equity = 5000.0
     peak   = equity
     max_dd = 0.0
     for pnl in df["pnl_usd"]:
