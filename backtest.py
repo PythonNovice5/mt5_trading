@@ -186,7 +186,11 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
             trade_open_until = exit_time
             duration_mins    = int((exit_time - entry_time).total_seconds() / 60)
-            pnl_usd          = round(FIXED_RISK_USD * rr, 2) if result == "TP" else -FIXED_RISK_USD
+            rr_achieved      = (exit_price - entry_price) / sl_distance
+            pnl_usd          = round(FIXED_RISK_USD * rr_achieved, 2)
+            # Relabel: exit above entry via trailing stop is a profit, not a loss
+            if result == "SL" and exit_price > entry_price:
+                result = "TS"   # trailing stop in profit
 
             trades.append({
                 "symbol":        symbol,
@@ -217,8 +221,8 @@ def compute_stats(trades: list[dict]) -> dict:
         return {}
 
     df = pd.DataFrame(trades)
-    wins   = df[df["result"] == "TP"]
-    losses = df[df["result"] == "SL"]
+    wins   = df[df["pnl_usd"] > 0]
+    losses = df[df["pnl_usd"] <= 0]
 
     total_pnl     = df["pnl_usd"].sum()
     gross_profit  = wins["pnl_usd"].sum() if len(wins) else 0
