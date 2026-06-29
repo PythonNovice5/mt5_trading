@@ -30,7 +30,7 @@ def generate_report(stats: dict, symbol: str, setup_tf: str, entry_tf: str, year
     # Trade log rows
     rows_html = ""
     for _, row in df.iterrows():
-        color = "#d4edda" if row["result"] == "TP" else "#f8d7da"
+        color = "#d4edda" if row["pnl_usd"] > 0 else "#f8d7da"
         rows_html += f"""
         <tr style="background:{color}">
             <td>{row['entry_time']}</td>
