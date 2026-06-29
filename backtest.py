@@ -115,31 +115,39 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
             continue
 
         # Find absolute low
-        abs_low_idx   = m5_slice["low"].idxmin()
-        abs_low_price = m5_slice.loc[abs_low_idx, "low"]
-
-        df_post_low   = m5_slice.iloc[abs_low_idx:].reset_index(drop=True)
-        swing_lows    = get_swing_low_levels(df_post_low)
+        abs_low_idx = m5_slice["low"].idxmin()
+        df_post_low = m5_slice.iloc[abs_low_idx:].reset_index(drop=True)
+        swing_lows  = get_swing_low_levels(df_post_low)
 
         if len(swing_lows) < 2:
             print(f"  → [{setup_time}] Not enough swing lows on M5 (found {len(swing_lows)})")
             continue
 
-        last_sl = swing_lows[-1]
-        prev_sl = swing_lows[-2]
+        # Find first confirmed higher low
+        higher_low_idx = None
+        for i in range(1, len(swing_lows)):
+            if swing_lows[i]["price"] > swing_lows[i - 1]["price"]:
+                higher_low_idx = swing_lows[i]["index"]
+                break
 
-        if last_sl["price"] <= prev_sl["price"]:
-            print(f"  → [{setup_time}] No higher low: {last_sl['price']} <= {prev_sl['price']}")
+        if higher_low_idx is None:
+            print(f"  → [{setup_time}] No higher low confirmed on M5")
             continue
 
-        # Check if last m5 candle closes above SH1
-        last_m5 = m5_slice.iloc[-1]
-        if last_m5["close"] <= sh1_price:
-            print(f"  → [{setup_time}] M5 close {last_m5['close']} not above SH1 {sh1_price}")
+        # Scan each M5 candle AFTER the higher low for close above SH1
+        candidates = df_post_low.iloc[higher_low_idx + 1:].reset_index(drop=True)
+        entry_candle = None
+        for _, candle in candidates.iterrows():
+            if candle["close"] > sh1_price:
+                entry_candle = candle
+                break
+
+        if entry_candle is None:
+            print(f"  → [{setup_time}] No M5 candle closed above SH1 {sh1_price}")
             continue
 
-        entry_price = last_m5["close"]
-        sl_price    = last_m5["low"] - pip_size(symbol)
+        entry_price = entry_candle["close"]
+        sl_price    = entry_candle["low"] - pip_size(symbol)
         sl_distance = entry_price - sl_price
 
         if sl_distance <= 0:
@@ -147,8 +155,8 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
         tp_1_5 = entry_price + sl_distance * TARGET_RR
 
-        # Next swing high above SH1
-        above_sh1 = [
+        # Next swing high above SH1 on M5
+        above_sh1  = [
             sh for sh in get_swing_high_levels(m5_slice)
             if sh["price"] > sh1_price and sh["price"] > entry_price
         ]
@@ -161,8 +169,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
             continue
 
         # ── SIMULATE TRADE OUTCOME ──
-        # Walk forward on m5 after entry to see if SL or TP hit first
-        entry_time = last_m5["time"]
+        entry_time = entry_candle["time"]
         m5_forward = m5[m5["time"] > entry_time].reset_index(drop=True)
 
         result    = "OPEN"
