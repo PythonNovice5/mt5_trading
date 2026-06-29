@@ -77,6 +77,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
     prev_m5          = None         # previous M5 candle (for inside bar check)
     mother_bar       = None         # mother candle of inside bar
     setup_expiry     = None         # abandon setup after this time
+    session_low      = float("inf") # lowest M5 low since RSI trigger
     trade_open_until = None         # skip M5 candles during open trade
 
     for i in range(1, len(m5)):
@@ -98,28 +99,33 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                 print(f"  → Setup expired — abandon | {candle['time']}")
             state = "INACTIVE"
             prev_m5 = mother_bar = setup_expiry = None
+            session_low = float("inf")
             continue
 
         # RSI drops below entry threshold → activate
         if h1_rsi < RSI_OVERSOLD and state == "INACTIVE":
             expiry = candle["time"] + pd.Timedelta(hours=SETUP_WINDOW_BARS)
             print(f"[RSI ACTIVE] {symbol} | {candle['time']} | H1 RSI={round(h1_rsi, 2)} | Expires {expiry}")
-            state         = "WATCHING"
-            prev_m5       = candle
-            setup_expiry  = expiry
+            state       = "WATCHING"
+            prev_m5     = candle
+            setup_expiry = expiry
+            session_low = candle["low"]
             continue
+
+        # Track lowest M5 low since RSI trigger
+        if state in ("WATCHING", "TRIGGERED"):
+            session_low = min(session_low, candle["low"])
 
         if state == "INACTIVE":
             continue
 
-        # ── WATCHING: detect inside bar ──────────────────────────────────────
+        # ── WATCHING: detect inside bar near the session low ─────────────────
         if state == "WATCHING":
-            mother_range = prev_m5["high"] - prev_m5["low"]
-            min_range    = pip_size(symbol) * 10  # minimum 10 pip mother bar
+            near_low = prev_m5["low"] <= session_low + pip_size(symbol) * 15
             if (candle["high"] < prev_m5["high"] and candle["low"] > prev_m5["low"]
-                    and mother_range >= min_range):
+                    and near_low):
                 mother_bar = prev_m5
-                print(f"  → Inside bar | Mother {mother_bar['time']} H={round(mother_bar['high'],5)} L={round(mother_bar['low'],5)} Range={round(mother_range/pip_size(symbol),1)}p | Inside {candle['time']}")
+                print(f"  → Inside bar | Mother {mother_bar['time']} H={round(mother_bar['high'],5)} L={round(mother_bar['low'],5)} | Inside {candle['time']} | session_low={round(session_low,5)}")
                 state = "TRIGGERED"
             else:
                 prev_m5 = candle
@@ -173,6 +179,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
             state = "INACTIVE"
             prev_m5 = mother_bar = setup_expiry = None
+            session_low = float("inf")
 
             if result == "OPEN":
                 continue
