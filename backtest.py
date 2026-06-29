@@ -117,25 +117,24 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         # Find absolute low
         abs_low_idx = m5_slice["low"].idxmin()
         df_post_low = m5_slice.iloc[abs_low_idx:].reset_index(drop=True)
-        swing_lows  = get_swing_low_levels(df_post_low)
 
-        if len(swing_lows) < 2:
-            print(f"  → [{setup_time}] Not enough swing lows on M5 (found {len(swing_lows)})")
-            continue
+        # # Higher low check — temporarily disabled
+        # swing_lows  = get_swing_low_levels(df_post_low)
+        # if len(swing_lows) < 2:
+        #     print(f"  → [{setup_time}] Not enough swing lows on M5 (found {len(swing_lows)})")
+        #     continue
+        # higher_low_idx = None
+        # for i in range(1, len(swing_lows)):
+        #     if swing_lows[i]["price"] > swing_lows[i - 1]["price"]:
+        #         higher_low_idx = swing_lows[i]["index"]
+        #         break
+        # if higher_low_idx is None:
+        #     print(f"  → [{setup_time}] No higher low confirmed on M5")
+        #     continue
+        # candidates = df_post_low.iloc[higher_low_idx + 1:].reset_index(drop=True)
 
-        # Find first confirmed higher low
-        higher_low_idx = None
-        for i in range(1, len(swing_lows)):
-            if swing_lows[i]["price"] > swing_lows[i - 1]["price"]:
-                higher_low_idx = swing_lows[i]["index"]
-                break
-
-        if higher_low_idx is None:
-            print(f"  → [{setup_time}] No higher low confirmed on M5")
-            continue
-
-        # Scan each M5 candle AFTER the higher low for close above SH1
-        candidates = df_post_low.iloc[higher_low_idx + 1:].reset_index(drop=True)
+        # Scan each M5 candle after absolute low for close above SH1
+        candidates = df_post_low.iloc[1:].reset_index(drop=True)
         entry_candle = None
         for _, candle in candidates.iterrows():
             if candle["close"] > sh1_price:
