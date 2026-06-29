@@ -82,8 +82,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
         # ── STEP 2: RSI check — create/update setup ──
         if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
-            if symbol not in active_setups:
-                print(f"[RSI SETUP] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)} | Close = {h1_candle['close']} | Low = {h1_candle['low']}")
+            print(f"[RSI {'NEW' if symbol not in active_setups else 'UPD'}] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)} | Close = {h1_candle['close']} | Low = {h1_candle['low']}")
             active_setups[symbol] = {
                 "setup_bar":  h1_idx,
                 "setup_time": h1_candle["time"],
