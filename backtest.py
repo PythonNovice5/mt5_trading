@@ -111,17 +111,14 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                 active_setups.pop(symbol, None)
                 continue
 
-            # Find SH1 = last swing high on M5 BEFORE the key low (look back up to 12 hours)
-            key_low_time   = setup["setup_time"]  # H1 RSI candle open time = when key low formed
-            m5_before_low  = m5[m5["time"] <= key_low_time].tail(144).reset_index(drop=True)  # last 12h of M5
-            swing_highs    = get_swing_high_levels(m5_before_low)
-
+            # Find SH1 = last swing high on M5 in the entry window before any candle closes above it
+            swing_highs = get_swing_high_levels(m5_slice)
             if not swing_highs:
-                print(f"  → [{setup['setup_time']}] No SH1 found on M5 before key low")
+                print(f"  → [{setup['setup_time']}] No SH1 found on M5 in entry window")
                 continue
 
             sh1_price = swing_highs[-1]["price"]
-            print(f"  → M5 SH1: {sh1_price} at {swing_highs[-1]['time']} | Key low: {key_low}")
+            print(f"  → M5 SH1: {sh1_price} at {swing_highs[-1]['time']}")
 
             # Find first M5 candle that closes above SH1
             entry_candle = None
