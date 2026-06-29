@@ -9,15 +9,29 @@ from config import SWING_LOOKBACK
 
 
 def calculate_rsi(closes: pd.Series, period: int = 14) -> pd.Series:
+    """Wilder's RSI — matches TradingView/MT5 standard calculation."""
     delta = closes.diff()
     gain  = delta.clip(lower=0)
     loss  = (-delta).clip(lower=0)
 
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
+    avg_gain = np.zeros(len(closes))
+    avg_loss = np.zeros(len(closes))
+
+    # First value: simple average
+    avg_gain[period] = gain.iloc[1:period + 1].mean()
+    avg_loss[period] = loss.iloc[1:period + 1].mean()
+
+    # Wilder's smoothing for remaining values
+    for i in range(period + 1, len(closes)):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain.iloc[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss.iloc[i]) / period
+
+    avg_gain = pd.Series(avg_gain, index=closes.index)
+    avg_loss = pd.Series(avg_loss, index=closes.index)
 
     rs  = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
+    rsi.iloc[:period] = np.nan
     return rsi
 
 

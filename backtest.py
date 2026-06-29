@@ -70,7 +70,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
             # New setup or update existing (each H1 candle with RSI < 25 resets the key low)
             if symbol not in active_setups:
-                print(f"[RSI SETUP] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)}")
+                print(f"[RSI SETUP] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)} | Close = {h1_candle['close']} | Low = {h1_candle['low']}")
             active_setups[symbol] = {
                 "setup_bar":   h1_idx,
                 "setup_time":  h1_candle["time"],
