@@ -83,7 +83,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         # ── STEP 2: RSI check — create/update setup ──
         if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
             h1_close_time = h1_candle["time"] + pd.Timedelta(hours=1)
-            m5_before     = m5[m5["time"] < h1_close_time].reset_index(drop=True)
+            m5_before     = m5[m5["time"] < h1_close_time].tail(48).reset_index(drop=True)
             sh_levels     = get_swing_high_levels(m5_before)
             sh1_val       = sh_levels[-1]["price"] if sh_levels else "N/A"
             sh1_time      = sh_levels[-1]["time"] if sh_levels else "N/A"
