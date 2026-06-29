@@ -107,8 +107,9 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
         # ── 5MIN ENTRY SCAN ──
         m5_slice = m5[m5["time"] >= setup_time].reset_index(drop=True)
-        # Only look at m5 candles up to current h1 candle close time
-        m5_slice = m5_slice[m5_slice["time"] <= h1_candle["time"]].reset_index(drop=True)
+        # Use H1 bar close time (open + 1 hour) as upper bound
+        h1_close_time = h1_candle["time"] + pd.Timedelta(hours=1)
+        m5_slice = m5_slice[m5_slice["time"] < h1_close_time].reset_index(drop=True)
 
         if len(m5_slice) < 10:
             continue
