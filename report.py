@@ -40,6 +40,8 @@ def generate_report(stats: dict, symbol: str, setup_tf: str, entry_tf: str, year
             <td>{row['sl_price']}</td>
             <td>{row['tp_price']}</td>
             <td>{row['exit_price']}</td>
+            <td>{row.get('mother_high', '')}</td>
+            <td>{row.get('mother_low', '')}</td>
             <td>{row['sl_pips']}</td>
             <td>{row['rr_planned']}</td>
             <td>{row['rr_achieved']}</td>
@@ -144,6 +146,7 @@ def generate_report(stats: dict, symbol: str, setup_tf: str, entry_tf: str, year
   <tr>
     <th>Entry Time</th><th>Exit Time</th><th>Symbol</th>
     <th>Entry</th><th>SL</th><th>TP</th><th>Exit</th>
+    <th>Mother High</th><th>Mother Low</th>
     <th>SL Pips</th><th>RR Plan</th><th>RR Got</th>
     <th>Result</th><th>P&amp;L</th><th>Duration</th>
   </tr>
