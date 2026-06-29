@@ -20,6 +20,7 @@ import numpy as np
 from config import (
     RSI_PERIOD, RSI_OVERSOLD, SETUP_WINDOW_BARS,
     SWING_LOOKBACK, TARGET_RR, FIXED_RISK_USD, USE_TRAILING_SL,
+    TRAIL_ACTIVATE_RR,
 )
 from indicators import calculate_rsi
 
@@ -148,10 +149,12 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                 print(f"  → ENTRY | {entry_time} | Entry={round(entry_price,5)} SL={round(sl_price,5)} TP={round(tp_price,5)}")
 
                 # Walk-forward simulation: trail SL up to each completed candle's low
-                result     = "OPEN"
-                exit_price = None
-                exit_time  = None
-                current_sl = sl_price
+                result      = "OPEN"
+                exit_price  = None
+                exit_time   = None
+                current_sl  = sl_price
+                trail_armed = (TRAIL_ACTIVATE_RR <= 0)   # arm immediately if threshold is 0
+                trail_level = entry_price + sl_distance * TRAIL_ACTIVATE_RR
 
                 for fwd_idx in range(i + 1, len(m5)):
                     row = m5.iloc[fwd_idx]
@@ -159,8 +162,11 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                         result = "SL"; exit_price = current_sl; exit_time = row["time"]; break
                     if row["high"] >= tp_price:
                         result = "TP"; exit_price = tp_price;   exit_time = row["time"]; break
+                    # Arm trailing once price reaches the activation R-multiple
+                    if not trail_armed and row["high"] >= trail_level:
+                        trail_armed = True
                     # Trail: move SL up to this completed candle's low (only upward)
-                    if USE_TRAILING_SL and row["low"] > current_sl:
+                    if USE_TRAILING_SL and trail_armed and row["low"] > current_sl:
                         current_sl = row["low"]
 
                 if result == "OPEN":
