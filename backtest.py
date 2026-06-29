@@ -66,32 +66,45 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         h1_candle = h1.iloc[h1_idx]
         rsi_val   = h1_candle["rsi"]
 
-        # ── 1H SETUP CHECK ──
-        if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
-            # New setup or update existing (each H1 candle with RSI < 25 resets the key low)
-            if symbol not in active_setups:
-                print(f"[RSI SETUP] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)} | Close = {h1_candle['close']} | Low = {h1_candle['low']}")
-            active_setups[symbol] = {
-                "setup_bar":   h1_idx,
-                "setup_time":  h1_candle["time"],
-                "key_low":     h1_candle["low"],   # fixed key low = low of RSI candle
-                "h1_open":     h1_candle["time"],
-                "h1_close":    h1_candle["time"] + pd.Timedelta(hours=1),
-                "rsi":         round(rsi_val, 2),
-            }
-        elif symbol in active_setups:
-            setup = active_setups[symbol]
-
-            # ── ENTRY WINDOW: only the 1 hour AFTER the RSI candle closes ──
+        # ── STEP 1: Check entry window for existing setup (before RSI update) ──
+        if symbol in active_setups:
+            setup              = active_setups[symbol]
             entry_window_start = setup["h1_close"]
             entry_window_end   = setup["h1_close"] + pd.Timedelta(hours=1)
             key_low            = setup["key_low"]
 
-            # Only scan during the entry window
-            if not (entry_window_start <= h1_candle["time"] < entry_window_end):
-                # Outside entry window — expire setup
+            if entry_window_start <= h1_candle["time"] < entry_window_end:
+                # We are in the entry window — scan M5 below
+                pass
+            else:
+                # Not in entry window — expire this setup
                 active_setups.pop(symbol, None)
-                continue
+
+        # ── STEP 2: RSI check — create/update setup ──
+        if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
+            if symbol not in active_setups:
+                print(f"[RSI SETUP] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)} | Close = {h1_candle['close']} | Low = {h1_candle['low']}")
+            active_setups[symbol] = {
+                "setup_bar":  h1_idx,
+                "setup_time": h1_candle["time"],
+                "key_low":    h1_candle["low"],
+                "h1_close":   h1_candle["time"] + pd.Timedelta(hours=1),
+                "rsi":        round(rsi_val, 2),
+            }
+
+        # ── STEP 3: Entry scan — only if we were in the entry window (from Step 1) ──
+        if symbol not in active_setups:
+            continue
+        setup = active_setups.get(symbol)
+        if setup is None:
+            continue
+
+        entry_window_start = setup["h1_close"]
+        entry_window_end   = setup["h1_close"] + pd.Timedelta(hours=1)
+        key_low            = setup["key_low"]
+
+        if not (entry_window_start <= h1_candle["time"] < entry_window_end):
+            continue
 
             if open_trades_count >= MAX_OPEN_TRADES:
                 continue
