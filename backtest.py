@@ -1,5 +1,5 @@
 """
-Backtester for the RSI Higher-High/Low strategy.
+Backtester for the RSI mean-reversion strategy with consolidation rectangle entry.
 Uses CSV data downloaded via download_data_claud.py.
 
 Usage:
@@ -14,11 +14,10 @@ import numpy as np
 from datetime import timedelta
 
 from config import (
-    RSI_PERIOD, RSI_OVERSOLD, SETUP_EXPIRY_BARS,
-    SWING_LOOKBACK, MIN_RR, TARGET_RR,
-    FIXED_RISK_USD, MAX_OPEN_TRADES,
+    RSI_PERIOD, RSI_OVERSOLD, SWING_LOOKBACK, MIN_RR, TARGET_RR,
+    FIXED_RISK_USD, MAX_OPEN_TRADES, RECT_MIN_CANDLES, RECT_MAX_RANGE_PCT,
 )
-from indicators import calculate_rsi, get_swing_high_levels, get_swing_low_levels
+from indicators import calculate_rsi, get_swing_low_levels
 
 
 # ── DATA LOADING ──────────────────────────────────────────────────────────────
@@ -27,7 +26,7 @@ def load_csv(symbol: str, timeframe: str, years: int) -> pd.DataFrame | None:
     path = f"data/{symbol}_{timeframe.upper()}_{years}y.csv"
     if not os.path.exists(path):
         print(f"File not found: {path}")
-        print("Run: python download_data_claud.py {symbol} {timeframe} {years}")
+        print(f"Run: python download_data_claud.py {symbol} {timeframe} {years}")
         return None
     df = pd.read_csv(path, parse_dates=["datetime"])
     df = df.rename(columns={"datetime": "time"})
@@ -43,182 +42,199 @@ def pips(distance: float, symbol: str) -> float:
     return round(distance / pip_size(symbol), 1)
 
 
+# ── CONSOLIDATION RECTANGLE DETECTION ────────────────────────────────────────
+
+def find_consolidation_rect(m5_candles: pd.DataFrame, min_candles: int, max_range_pct: float) -> dict | None:
+    """
+    Find first consolidation rectangle in m5_candles.
+    A rectangle is min_candles+ consecutive candles with high-low range <= max_range_pct.
+    Extends the rectangle while adding more candles keeps range within limit.
+    Returns {rect_high, rect_low, start_time, end_time, end_pos} or None.
+    """
+    n = len(m5_candles)
+    if n < min_candles:
+        return None
+
+    for start in range(n - min_candles + 1):
+        window = m5_candles.iloc[start:start + min_candles]
+        rect_high = window["high"].max()
+        rect_low  = window["low"].min()
+
+        if rect_low <= 0:
+            continue
+
+        if (rect_high - rect_low) / rect_low > max_range_pct:
+            continue
+
+        # Extend rectangle while range stays tight
+        end = start + min_candles
+        while end < n:
+            new_high = max(rect_high, m5_candles.iloc[end]["high"])
+            new_low  = min(rect_low,  m5_candles.iloc[end]["low"])
+            if (new_high - new_low) / new_low <= max_range_pct:
+                rect_high = new_high
+                rect_low  = new_low
+                end += 1
+            else:
+                break
+
+        return {
+            "rect_high":  rect_high,
+            "rect_low":   rect_low,
+            "start_time": m5_candles.iloc[start]["time"],
+            "end_time":   m5_candles.iloc[end - 1]["time"],
+            "end_pos":    end - 1,
+        }
+
+    return None
+
+
 # ── BACKTEST ENGINE ───────────────────────────────────────────────────────────
 
 def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
     """
-    Simulate the strategy on historical data.
-    Returns list of trade dicts.
+    Walk H1 bars. On RSI < oversold, activate setup.
+    Scan M5 from setup_time for consolidation rectangle + breakout.
+    Simulate trade with trailing SL walk-forward.
     """
     h1 = h1.copy().reset_index(drop=True)
     m5 = m5.copy().reset_index(drop=True)
-
     h1["rsi"] = calculate_rsi(h1["close"], RSI_PERIOD)
 
-    trades   = []
-    open_trades_count = 0
-    active_setups: dict[str, dict] = {}  # keyed by symbol (single symbol here)
+    trades       = []
+    active_setup = None  # {key_low, setup_time, rsi}
 
-    # Pre-compute swing highs/lows on m5 once — iterate by index
-    # We'll do a rolling window approach per signal instead
+    for h1_idx in range(RSI_PERIOD + 1, len(h1)):
+        h1_candle     = h1.iloc[h1_idx]
+        rsi_val       = h1_candle["rsi"]
+        h1_open_time  = h1_candle["time"]
+        h1_close_time = h1_open_time + pd.Timedelta(hours=1)
 
-    for h1_idx in range(RSI_PERIOD + SWING_LOOKBACK + 1, len(h1)):
-        h1_candle = h1.iloc[h1_idx]
-        rsi_val   = h1_candle["rsi"]
-
-        # ── STEP 1: Check entry window for existing setup (before RSI update) ──
-        if symbol in active_setups:
-            setup              = active_setups[symbol]
-            entry_window_start = setup["h1_close"]
-            entry_window_end   = setup["h1_close"] + pd.Timedelta(hours=1)
-            key_low            = setup["key_low"]
-
-            if entry_window_start <= h1_candle["time"] < entry_window_end:
-                # We are in the entry window — scan M5 below
-                pass
-            else:
-                # Not in entry window — expire this setup
-                active_setups.pop(symbol, None)
-
-        # ── STEP 2: RSI check — create/update setup ──
+        # ── RSI setup: create on first hit, update key_low on subsequent hits ──
         if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
-            h1_close_time  = h1_candle["time"] + pd.Timedelta(hours=1)
-            m5_window      = m5[m5["time"] < h1_close_time].tail(48).reset_index(drop=True)
-            abs_low_idx    = m5_window["low"].idxmin()
-            m5_pre_low     = m5_window.iloc[:abs_low_idx].reset_index(drop=True)
-            sh_levels      = get_swing_high_levels(m5_pre_low, lookback=1)
-            sh1_val        = sh_levels[-1]["price"] if sh_levels else "N/A"
-            sh1_time       = sh_levels[-1]["time"] if sh_levels else "N/A"
-            print(f"[RSI {'NEW' if symbol not in active_setups else 'UPD'}] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)} | Close = {h1_candle['close']} | Low = {h1_candle['low']} | M5 SH1 = {sh1_val} at {sh1_time}")
-            active_setups[symbol] = {
-                "setup_bar":  h1_idx,
-                "setup_time": h1_candle["time"],
-                "key_low":    h1_candle["low"],
-                "h1_close":   h1_candle["time"] + pd.Timedelta(hours=1),
-                "rsi":        round(rsi_val, 2),
-            }
+            tag = "NEW" if active_setup is None else "UPD"
+            print(f"[RSI {tag}] {symbol} | {h1_open_time} | RSI={round(rsi_val,2)} | Close={h1_candle['close']} | Low={h1_candle['low']}")
+            if active_setup is None:
+                active_setup = {
+                    "key_low":    h1_candle["low"],
+                    "setup_time": h1_close_time,
+                    "rsi":        round(rsi_val, 2),
+                }
+            else:
+                active_setup["key_low"] = h1_candle["low"]
+                active_setup["rsi"]     = round(rsi_val, 2)
 
-        # ── STEP 3: Entry scan — only if we were in the entry window (from Step 1) ──
-        if symbol not in active_setups:
-            continue
-        setup = active_setups.get(symbol)
-        if setup is None:
+        if active_setup is None:
             continue
 
-        entry_window_start = setup["h1_close"]
-        entry_window_end   = setup["h1_close"] + pd.Timedelta(hours=1)
-        key_low            = setup["key_low"]
+        # ── Scan M5 from setup_time to current H1 close ──
+        m5_slice = m5[
+            (m5["time"] >= active_setup["setup_time"]) &
+            (m5["time"] <  h1_close_time)
+        ].reset_index(drop=True)
 
-        if not (entry_window_start <= h1_candle["time"] < entry_window_end):
+        if len(m5_slice) < RECT_MIN_CANDLES:
             continue
 
-            if open_trades_count >= MAX_OPEN_TRADES:
-                continue
+        # Invalidate if key_low broken on M5
+        if m5_slice["low"].min() < active_setup["key_low"]:
+            print(f"  → Key low {active_setup['key_low']} breached — reset")
+            active_setup = None
+            continue
 
-            # ── 5MIN ENTRY SCAN ──
-            m5_slice = m5[
-                (m5["time"] >= entry_window_start) &
-                (m5["time"] < entry_window_end)
-            ].reset_index(drop=True)
+        # Find consolidation rectangle
+        rect = find_consolidation_rect(m5_slice, RECT_MIN_CANDLES, RECT_MAX_RANGE_PCT)
+        if rect is None:
+            continue
 
-            if len(m5_slice) < 3:
-                continue
+        # Scan M5 candles after rectangle end for breakout close above rect_high
+        m5_after_rect = m5_slice[m5_slice["time"] > rect["end_time"]].reset_index(drop=True)
+        entry_candle = None
+        for _, candle in m5_after_rect.iterrows():
+            if candle["close"] > rect["rect_high"]:
+                entry_candle = candle
+                break
 
-            # Invalidate if price breaks below key low
-            if m5_slice["low"].min() < key_low:
-                print(f"  → [{setup['setup_time']}] Key low {key_low} breached — reset")
-                active_setups.pop(symbol, None)
-                continue
+        if entry_candle is None:
+            continue
 
-            # Find SH1 = last swing high on M5 in the entry window before any candle closes above it
-            swing_highs = get_swing_high_levels(m5_slice)
-            if not swing_highs:
-                print(f"  → [{setup['setup_time']}] No SH1 found on M5 in entry window")
-                continue
+        entry_price = entry_candle["close"]
+        sl_price    = rect["rect_low"]
+        sl_distance = entry_price - sl_price
 
-            sh1_price = swing_highs[-1]["price"]
-            print(f"  → M5 SH1: {sh1_price} at {swing_highs[-1]['time']}")
+        if sl_distance <= 0:
+            active_setup = None
+            continue
 
-            # Find first M5 candle that closes above SH1
-            entry_candle = None
-            for _, candle in m5_slice.iterrows():
-                if candle["time"] > swing_highs[-1]["time"] and candle["close"] > sh1_price:
-                    entry_candle = candle
-                    break
+        tp_price = entry_price + sl_distance * TARGET_RR
+        rr       = TARGET_RR
 
-            if entry_candle is None:
-                print(f"  → [{setup['setup_time']}] No M5 candle closed above SH1 {sh1_price}")
-                continue
+        if rr < MIN_RR:
+            active_setup = None
+            continue
 
-            entry_price = entry_candle["close"]
-            sl_price    = entry_candle["low"] - pip_size(symbol)
-            sl_distance = entry_price - sl_price
+        print(f"  → ENTRY | {entry_candle['time']} | Entry={round(entry_price,5)} SL={round(sl_price,5)} TP={round(tp_price,5)} Rect=[{round(rect['rect_low'],5)},{round(rect['rect_high'],5)}]")
 
-            if sl_distance <= 0:
-                continue
+        # ── Walk-forward trade simulation with trailing SL ──
+        entry_time = entry_candle["time"]
+        m5_forward = m5[m5["time"] > entry_time].reset_index(drop=True)
 
-            tp_1_5 = entry_price + sl_distance * TARGET_RR
+        result     = "OPEN"
+        exit_price = None
+        exit_time  = None
+        current_sl = sl_price
 
-            # Next swing high above SH1 on M5 for TP
-            above_sh1  = [
-                sh for sh in get_swing_high_levels(m5_slice)
-                if sh["price"] > sh1_price and sh["price"] > entry_price
-            ]
-            next_sh_tp = above_sh1[0]["price"] if above_sh1 else None
+        for fwd_idx, row in m5_forward.iterrows():
+            # Check trailing SL
+            if row["low"] <= current_sl:
+                result     = "SL"
+                exit_price = current_sl
+                exit_time  = row["time"]
+                break
+            # Check TP
+            if row["high"] >= tp_price:
+                result     = "TP"
+                exit_price = tp_price
+                exit_time  = row["time"]
+                break
+            # Trail SL: confirm swing low SWING_LOOKBACK candles ago
+            check_idx = fwd_idx - SWING_LOOKBACK
+            if check_idx >= SWING_LOOKBACK:
+                candidate_low = m5_forward.iloc[check_idx]["low"]
+                left  = [m5_forward.iloc[j]["low"] for j in range(check_idx - SWING_LOOKBACK, check_idx)]
+                right = [m5_forward.iloc[j]["low"] for j in range(check_idx + 1, check_idx + SWING_LOOKBACK + 1)]
+                if all(candidate_low < l for l in left) and all(candidate_low < r for r in right):
+                    if candidate_low > current_sl:
+                        current_sl = candidate_low
+                        print(f"    → Trail SL → {round(current_sl,5)} at {m5_forward.iloc[check_idx]['time']}")
 
-            tp_price = max(tp_1_5, next_sh_tp) if next_sh_tp else tp_1_5
-            rr       = (tp_price - entry_price) / sl_distance
+        if result == "OPEN":
+            active_setup = None
+            continue
 
-            if rr < MIN_RR:
-                print(f"  → [{setup['setup_time']}] RR {round(rr,2)} below minimum {MIN_RR}")
-                continue
+        duration_mins = int((exit_time - entry_time).total_seconds() / 60)
+        pnl_usd       = round(FIXED_RISK_USD * rr, 2) if result == "TP" else -FIXED_RISK_USD
 
-            # ── SIMULATE TRADE OUTCOME ──
-            entry_time = entry_candle["time"]
-            m5_forward = m5[m5["time"] > entry_time].reset_index(drop=True)
+        trades.append({
+            "symbol":        symbol,
+            "entry_time":    entry_time,
+            "exit_time":     exit_time,
+            "entry_price":   round(entry_price, 5),
+            "sl_price":      round(sl_price, 5),
+            "tp_price":      round(tp_price, 5),
+            "exit_price":    round(exit_price, 5),
+            "sl_pips":       pips(sl_distance, symbol),
+            "rr_planned":    rr,
+            "rr_achieved":   round((exit_price - entry_price) / sl_distance, 2),
+            "result":        result,
+            "pnl_usd":       pnl_usd,
+            "duration_mins": duration_mins,
+            "rsi_at_setup":  active_setup["rsi"],
+            "rect_high":     round(rect["rect_high"], 5),
+            "rect_low":      round(rect["rect_low"], 5),
+        })
 
-            result     = "OPEN"
-            exit_price = None
-            exit_time  = None
-            pnl_usd    = None
-
-            for _, row in m5_forward.iterrows():
-                if row["low"] <= sl_price:
-                    result     = "SL"
-                    exit_price = sl_price
-                    exit_time  = row["time"]
-                    pnl_usd    = -FIXED_RISK_USD
-                    break
-                if row["high"] >= tp_price:
-                    result     = "TP"
-                    exit_price = tp_price
-                    exit_time  = row["time"]
-                    pnl_usd    = round(FIXED_RISK_USD * rr, 2)
-                    break
-
-            if result == "OPEN":
-                continue
-
-            duration_mins = int((exit_time - entry_time).total_seconds() / 60) if exit_time else None
-            active_setups.pop(symbol, None)
-
-            trades.append({
-                "symbol":        symbol,
-                "entry_time":    entry_time,
-                "exit_time":     exit_time,
-                "entry_price":   round(entry_price, 5),
-                "sl_price":      round(sl_price, 5),
-                "tp_price":      round(tp_price, 5),
-                "exit_price":    round(exit_price, 5),
-                "sl_pips":       pips(sl_distance, symbol),
-                "rr_planned":    round(rr, 2),
-                "rr_achieved":   round((exit_price - entry_price) / sl_distance, 2) if exit_price else None,
-                "result":        result,
-                "pnl_usd":       pnl_usd,
-                "duration_mins": duration_mins,
-                "rsi_at_setup":  setup["rsi"],
-                "sh1_price":     sh1_price,
-            })
+        active_setup = None
 
     return trades
 
@@ -238,19 +254,15 @@ def compute_stats(trades: list[dict]) -> dict:
     gross_loss    = abs(losses["pnl_usd"].sum()) if len(losses) else 0
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else float("inf")
 
-    # Equity curve for max drawdown
-    equity = FIXED_RISK_USD * 20  # approximate starting equity placeholder
+    equity = FIXED_RISK_USD * 400  # $5000 starting balance
     peak   = equity
     max_dd = 0.0
     for pnl in df["pnl_usd"]:
         equity += pnl
         peak    = max(peak, equity)
-        dd      = peak - equity
-        max_dd  = max(max_dd, dd)
+        max_dd  = max(max_dd, peak - equity)
 
-    # Consecutive losses
-    max_consec_loss = 0
-    cur = 0
+    max_consec_loss = cur = 0
     for r in df["result"]:
         if r == "SL":
             cur += 1
@@ -258,7 +270,6 @@ def compute_stats(trades: list[dict]) -> dict:
         else:
             cur = 0
 
-    # Per-symbol breakdown
     by_symbol = df.groupby("symbol").agg(
         trades=("result", "count"),
         wins=("result", lambda x: (x == "TP").sum()),
@@ -266,28 +277,28 @@ def compute_stats(trades: list[dict]) -> dict:
     ).round(2).to_dict("index")
 
     return {
-        "total_trades":       len(df),
-        "wins":               len(wins),
-        "losses":             len(losses),
-        "win_rate":           round(len(wins) / len(df) * 100, 1),
-        "total_pnl_usd":      round(total_pnl, 2),
-        "profit_factor":      profit_factor,
-        "max_drawdown_usd":   round(max_dd, 2),
-        "avg_rr_achieved":    round(df["rr_achieved"].mean(), 2),
-        "avg_duration_mins":  round(df["duration_mins"].mean(), 1),
-        "max_consec_losses":  max_consec_loss,
-        "by_symbol":          by_symbol,
-        "trades_df":          df,
+        "total_trades":      len(df),
+        "wins":              len(wins),
+        "losses":            len(losses),
+        "win_rate":          round(len(wins) / len(df) * 100, 1),
+        "total_pnl_usd":     round(total_pnl, 2),
+        "profit_factor":     profit_factor,
+        "max_drawdown_usd":  round(max_dd, 2),
+        "avg_rr_achieved":   round(df["rr_achieved"].mean(), 2),
+        "avg_duration_mins": round(df["duration_mins"].mean(), 1),
+        "max_consec_losses": max_consec_loss,
+        "by_symbol":         by_symbol,
+        "trades_df":         df,
     }
 
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    symbol    = sys.argv[1] if len(sys.argv) > 1 else "EURUSD"
-    setup_tf  = sys.argv[2] if len(sys.argv) > 2 else "H1"
-    entry_tf  = sys.argv[3] if len(sys.argv) > 3 else "M5"
-    years     = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+    symbol   = sys.argv[1] if len(sys.argv) > 1 else "EURUSD"
+    setup_tf = sys.argv[2] if len(sys.argv) > 2 else "H1"
+    entry_tf = sys.argv[3] if len(sys.argv) > 3 else "M5"
+    years    = int(sys.argv[4]) if len(sys.argv) > 4 else 1
 
     print(f"\nLoading {symbol} data...")
     h1 = load_csv(symbol, setup_tf, years)
@@ -306,7 +317,7 @@ if __name__ == "__main__":
         print("No trades found.")
         sys.exit(0)
 
-    print(f"Total Trades    : {stats['total_trades']}")
+    print(f"\nTotal Trades    : {stats['total_trades']}")
     print(f"Wins / Losses   : {stats['wins']} / {stats['losses']}")
     print(f"Win Rate        : {stats['win_rate']}%")
     print(f"Total P&L       : ${stats['total_pnl_usd']}")
