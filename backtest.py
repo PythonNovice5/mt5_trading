@@ -69,6 +69,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         # ── 1H SETUP CHECK ──
         if symbol not in active_setups:
             if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
+                print(f"[RSI SETUP] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)}")
                 # Find last swing high before this candle
                 h1_slice    = h1.iloc[:h1_idx + 1]
                 swing_highs = get_swing_high_levels(h1_slice)

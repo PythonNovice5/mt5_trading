@@ -83,6 +83,8 @@ def check_1h_setup(symbol: str) -> dict | None:
     if pd.isna(last["rsi"]) or last["rsi"] >= RSI_OVERSOLD:
         return None
 
+    print(f"[RSI SETUP] {symbol} | {last['time']} | RSI = {round(last['rsi'], 2)}")
+
     low_candle_idx = len(df) - 1
     low_price      = last["low"]
     low_time       = last["time"]
