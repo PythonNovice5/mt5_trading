@@ -70,24 +70,13 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         if symbol not in active_setups:
             if pd.notna(rsi_val) and rsi_val < RSI_OVERSOLD:
                 print(f"[RSI SETUP] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)}")
-                # Find last swing high before this candle
-                h1_slice    = h1.iloc[:h1_idx + 1]
-                swing_highs = get_swing_high_levels(h1_slice)
-                prior_highs = [sh for sh in swing_highs if sh["index"] < h1_idx]
-
-                if prior_highs:
-                    sh1 = prior_highs[-1]
-                    print(f"  → SH1 found: {sh1['price']} at {sh1['time']}")
-                    active_setups[symbol] = {
-                        "setup_bar":  h1_idx,
-                        "setup_time": h1_candle["time"],
-                        "low_price":  h1_candle["low"],
-                        "sh1_price":  sh1["price"],
-                        "sh1_time":   sh1["time"],
-                        "rsi":        round(rsi_val, 2),
-                    }
-                else:
-                    print(f"  → No SH1 found — setup skipped")
+                # SH1 will be found on M5 chart — just record setup time here
+                active_setups[symbol] = {
+                    "setup_bar":  h1_idx,
+                    "setup_time": h1_candle["time"],
+                    "low_price":  h1_candle["low"],
+                    "rsi":        round(rsi_val, 2),
+                }
         else:
             # Expire check
             setup = active_setups[symbol]
@@ -98,8 +87,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         if symbol not in active_setups:
             continue
 
-        setup = active_setups[symbol]
-        sh1_price  = setup["sh1_price"]
+        setup      = active_setups[symbol]
         setup_time = setup["setup_time"]
 
         if open_trades_count >= MAX_OPEN_TRADES:
@@ -114,9 +102,22 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         if len(m5_slice) < 10:
             continue
 
-        # Find absolute low
+        # Find absolute low on M5
         abs_low_idx = m5_slice["low"].idxmin()
-        df_post_low = m5_slice.iloc[abs_low_idx:].reset_index(drop=True)
+
+        # Find SH1 = last swing high on M5 BEFORE the absolute low
+        df_pre_low  = m5_slice.iloc[:abs_low_idx + 1].reset_index(drop=True)
+        swing_highs = get_swing_high_levels(df_pre_low)
+
+        if not swing_highs:
+            print(f"  → [{setup_time}] No SH1 found on M5 before absolute low")
+            continue
+
+        sh1_price = swing_highs[-1]["price"]
+        print(f"  → M5 SH1: {sh1_price} at {swing_highs[-1]['time']}")
+
+        # Scan each M5 candle after absolute low for close above SH1
+        df_post_low  = m5_slice.iloc[abs_low_idx + 1:].reset_index(drop=True)
 
         # # Higher low check — temporarily disabled
         # swing_lows  = get_swing_low_levels(df_post_low)
@@ -133,10 +134,8 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         #     continue
         # candidates = df_post_low.iloc[higher_low_idx + 1:].reset_index(drop=True)
 
-        # Scan each M5 candle after absolute low for close above SH1
-        candidates = df_post_low.iloc[1:].reset_index(drop=True)
         entry_candle = None
-        for _, candle in candidates.iterrows():
+        for _, candle in df_post_low.iterrows():
             if candle["close"] > sh1_price:
                 entry_candle = candle
                 break

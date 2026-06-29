@@ -89,23 +89,11 @@ def check_1h_setup(symbol: str) -> dict | None:
     low_price      = last["low"]
     low_time       = last["time"]
 
-    # Find last swing high BEFORE this low candle
-    swing_highs = get_swing_high_levels(df)
-    # Filter only those before the low candle
-    prior_highs = [sh for sh in swing_highs if sh["index"] < low_candle_idx]
-
-    if not prior_highs:
-        return None
-
-    # Most recent swing high before the low = SH1
-    sh1 = prior_highs[-1]
-
+    # SH1 will be found on M5 chart during entry check
     return {
         "symbol":          symbol,
         "setup_time":      low_time,
         "low_price":       low_price,
-        "sh1_price":       sh1["price"],
-        "sh1_time":        sh1["time"],
         "expiry_bar":      low_candle_idx + SETUP_EXPIRY_BARS,
         "h1_bar_at_setup": low_candle_idx,
         "rsi_at_setup":    round(last["rsi"], 2),
@@ -127,7 +115,6 @@ def check_entry_signal(symbol: str, setup: dict) -> dict | None:
     if df is None or len(df) < 20:
         return None
 
-    sh1_price = setup["sh1_price"]
     setup_time = setup["setup_time"]
 
     # Only look at candles from setup time onward
@@ -135,24 +122,16 @@ def check_entry_signal(symbol: str, setup: dict) -> dict | None:
     if len(df_after) < 10:
         return None
 
-    # Step 1: Find absolute low after setup
-    abs_low_idx   = df_after["low"].idxmin()
-    abs_low_price = df_after.loc[abs_low_idx, "low"]
+    # Step 1: Find absolute low on M5 after setup
+    abs_low_idx = df_after["low"].idxmin()
 
-    # Step 2: Find swing lows after the absolute low
-    df_post_low = df_after.iloc[abs_low_idx:].reset_index(drop=True)
-    swing_lows  = get_swing_low_levels(df_post_low)
-
-    # Need at least 2 swing lows to confirm higher low
-    if len(swing_lows) < 2:
+    # Step 2: Find SH1 = last swing high on M5 BEFORE the absolute low
+    df_pre_low  = df_after.iloc[:abs_low_idx + 1].reset_index(drop=True)
+    swing_highs = get_swing_high_levels(df_pre_low)
+    if not swing_highs:
         return None
-
-    last_sl  = swing_lows[-1]
-    prev_sl  = swing_lows[-2]
-
-    # Confirm higher low: last swing low > previous swing low
-    if last_sl["price"] <= prev_sl["price"]:
-        return None
+    sh1_price = swing_highs[-1]["price"]
+    print(f"[M5 SH1] {symbol} | {swing_highs[-1]['time']} | SH1 = {sh1_price}")
 
     # Step 3: Last closed candle closes above SH1
     last_candle = df.iloc[-1]
@@ -167,13 +146,11 @@ def check_entry_signal(symbol: str, setup: dict) -> dict | None:
     if sl_distance <= 0:
         return None
 
-    tp_1_3 = entry_price + (sl_distance * MIN_RR)
     tp_1_5 = entry_price + (sl_distance * TARGET_RR)
 
-    # Find next swing high above SH1 on 5min for TP target
-    swing_highs  = get_swing_high_levels(df)
-    above_sh1    = [sh for sh in swing_highs if sh["price"] > sh1_price and sh["price"] > entry_price]
-    next_sh_tp   = above_sh1[0]["price"] if above_sh1 else None
+    # Find next swing high above SH1 on M5 for TP target
+    above_sh1  = [sh for sh in get_swing_high_levels(df) if sh["price"] > sh1_price and sh["price"] > entry_price]
+    next_sh_tp = above_sh1[0]["price"] if above_sh1 else None
 
     # TP = furthest of 1:5 or next swing high, minimum 1:3
     if next_sh_tp and next_sh_tp > tp_1_5:
