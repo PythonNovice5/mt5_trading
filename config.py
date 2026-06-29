@@ -35,6 +35,9 @@ SWING_LOOKBACK     = 3       # Candles on each side to confirm a swing high/low
 MIN_RR             = 3.0     # Minimum RR to take the trade
 TARGET_RR          = 5.0     # Primary TP target
 
+# ── EXIT MANAGEMENT ──
+USE_TRAILING_SL    = True    # True = trail SL on M5 swing lows; False = fixed SL + TP only
+
 # ── CONSOLIDATION RECTANGLE ──
 RECT_MIN_CANDLES   = 5       # Min M5 candles to form a valid rectangle
 RECT_MAX_RANGE_PCT = 0.001   # Max range as % of price (0.1%)

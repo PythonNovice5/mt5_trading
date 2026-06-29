@@ -19,7 +19,7 @@ import numpy as np
 
 from config import (
     RSI_PERIOD, RSI_OVERSOLD, SETUP_WINDOW_BARS,
-    SWING_LOOKBACK, TARGET_RR, FIXED_RISK_USD,
+    SWING_LOOKBACK, TARGET_RR, FIXED_RISK_USD, USE_TRAILING_SL,
 )
 from indicators import calculate_rsi
 
@@ -176,7 +176,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                     result = "TP"; exit_price = tp_price;   exit_time = row["time"]; break
                 # Confirm swing low SWING_LOOKBACK candles ago and trail SL up
                 check_idx = fwd_idx - SWING_LOOKBACK
-                if check_idx >= SWING_LOOKBACK:
+                if USE_TRAILING_SL and check_idx >= SWING_LOOKBACK:
                     cand  = m5_fwd.iloc[check_idx]["low"]
                     left  = [m5_fwd.iloc[j]["low"] for j in range(check_idx - SWING_LOOKBACK, check_idx)]
                     right = [m5_fwd.iloc[j]["low"] for j in range(check_idx + 1, check_idx + SWING_LOOKBACK + 1)]
