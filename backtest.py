@@ -86,7 +86,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
             m5_window      = m5[m5["time"] < h1_close_time].tail(48).reset_index(drop=True)
             abs_low_idx    = m5_window["low"].idxmin()
             m5_pre_low     = m5_window.iloc[:abs_low_idx].reset_index(drop=True)
-            sh_levels      = get_swing_high_levels(m5_pre_low)
+            sh_levels      = get_swing_high_levels(m5_pre_low, lookback=1)
             sh1_val        = sh_levels[-1]["price"] if sh_levels else "N/A"
             sh1_time       = sh_levels[-1]["time"] if sh_levels else "N/A"
             print(f"[RSI {'NEW' if symbol not in active_setups else 'UPD'}] {symbol} | {h1_candle['time']} | RSI = {round(rsi_val, 2)} | Close = {h1_candle['close']} | Low = {h1_candle['low']} | M5 SH1 = {sh1_val} at {sh1_time}")
