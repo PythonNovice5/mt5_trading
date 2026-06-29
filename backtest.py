@@ -18,7 +18,7 @@ import pandas as pd
 import numpy as np
 
 from config import (
-    RSI_PERIOD, RSI_OVERSOLD, RSI_SETUP_EXIT,
+    RSI_PERIOD, RSI_OVERSOLD, SETUP_WINDOW_BARS,
     SWING_LOOKBACK, TARGET_RR, FIXED_RISK_USD,
 )
 from indicators import calculate_rsi
@@ -76,6 +76,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
     state            = "INACTIVE"   # INACTIVE | WATCHING | TRIGGERED
     prev_m5          = None         # previous M5 candle (for inside bar check)
     mother_bar       = None         # mother candle of inside bar
+    setup_expiry     = None         # abandon setup after this time
     trade_open_until = None         # skip M5 candles during open trade
 
     for i in range(1, len(m5)):
@@ -91,19 +92,21 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                 continue
             trade_open_until = None
 
-        # RSI back above exit threshold → abandon
-        if h1_rsi >= RSI_SETUP_EXIT:
+        # Setup expired → abandon
+        if setup_expiry is not None and candle["time"] >= setup_expiry:
             if state != "INACTIVE":
-                print(f"  → RSI >= {RSI_SETUP_EXIT} — abandon | {candle['time']}")
+                print(f"  → Setup expired — abandon | {candle['time']}")
             state = "INACTIVE"
-            prev_m5 = mother_bar = None
+            prev_m5 = mother_bar = setup_expiry = None
             continue
 
         # RSI drops below entry threshold → activate
         if h1_rsi < RSI_OVERSOLD and state == "INACTIVE":
-            print(f"[RSI ACTIVE] {symbol} | {candle['time']} | H1 RSI={round(h1_rsi, 2)}")
-            state   = "WATCHING"
-            prev_m5 = candle
+            expiry = candle["time"] + pd.Timedelta(hours=SETUP_WINDOW_BARS)
+            print(f"[RSI ACTIVE] {symbol} | {candle['time']} | H1 RSI={round(h1_rsi, 2)} | Expires {expiry}")
+            state         = "WATCHING"
+            prev_m5       = candle
+            setup_expiry  = expiry
             continue
 
         if state == "INACTIVE":
@@ -165,7 +168,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                         print(f"    → Trail SL → {round(current_sl,5)} at {m5_fwd.iloc[check_idx]['time']}")
 
             state = "INACTIVE"
-            prev_m5 = mother_bar = None
+            prev_m5 = mother_bar = setup_expiry = None
 
             if result == "OPEN":
                 continue
