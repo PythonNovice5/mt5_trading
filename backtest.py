@@ -114,7 +114,8 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
         # ── WATCHING: detect inside bar ──────────────────────────────────────
         if state == "WATCHING":
-            if candle["high"] < prev_m5["high"] and candle["low"] > prev_m5["low"]:
+            if (candle["high"] < prev_m5["high"] and candle["low"] > prev_m5["low"]
+                    and prev_m5["close"] > prev_m5["open"]):  # mother bar must be bullish
                 mother_bar = prev_m5
                 print(f"  → Inside bar | Mother {mother_bar['time']} H={round(mother_bar['high'],5)} L={round(mother_bar['low'],5)} | Inside {candle['time']}")
                 state = "TRIGGERED"
@@ -124,7 +125,8 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
         # ── TRIGGERED: wait for close above mother bar high ──────────────────
         if state == "TRIGGERED":
-            if candle["close"] <= mother_bar["high"]:
+            min_breakout = mother_bar["high"] + pip_size(symbol)
+            if candle["close"] <= min_breakout:
                 continue
 
             entry_price = candle["close"]
