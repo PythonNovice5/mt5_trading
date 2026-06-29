@@ -51,10 +51,11 @@ def pips(distance: float, symbol: str) -> float:
 def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
     """
     State machine on M5 candles:
-      INACTIVE  → WATCHING  : H1 RSI drops below RSI_OVERSOLD
-      WATCHING  → TRIGGERED : inside bar found on M5
-      TRIGGERED → trade     : M5 close above mother bar high
-      any state → INACTIVE  : H1 RSI rises above RSI_SETUP_EXIT
+      INACTIVE → WATCHING : H1 RSI closes below RSI_OVERSOLD
+      WATCHING → ARMED    : 3 consecutive higher highs on M5 (mark 3rd high + low)
+      ARMED    → trade    : price breaks above marked high (intrabar)
+      after exit          : back to WATCHING (keep scanning within window)
+      window expires (6h) : back to INACTIVE
     """
     h1 = h1.copy().reset_index(drop=True)
     m5 = m5.copy().reset_index(drop=True)
@@ -73,12 +74,17 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
     ).reset_index(drop=True)
 
     trades           = []
-    state            = "INACTIVE"   # INACTIVE | WATCHING | TRIGGERED
-    prev_m5          = None         # previous M5 candle (for inside bar check)
-    mother_bar       = None         # mother candle of inside bar
+    state            = "INACTIVE"   # INACTIVE | WATCHING | ARMED
+    marked_high      = None         # high of 3rd (highest) higher-high candle
+    marked_low       = None         # low of that same candle → SL
     setup_expiry     = None         # abandon setup after this time
-    session_low      = float("inf") # lowest M5 low since RSI trigger
     trade_open_until = None         # skip M5 candles during open trade
+
+    def three_higher_highs(idx: int) -> bool:
+        """True if m5[idx-2..idx] form 3 strictly higher highs."""
+        if idx < 2:
+            return False
+        return (m5.iloc[idx - 2]["high"] < m5.iloc[idx - 1]["high"] < m5.iloc[idx]["high"])
 
     for i in range(1, len(m5)):
         candle  = m5.iloc[i]
@@ -93,130 +99,111 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                 continue
             trade_open_until = None
 
-        # Setup expired → abandon
+        # Window expired → go idle
         if setup_expiry is not None and candle["time"] >= setup_expiry:
             if state != "INACTIVE":
-                print(f"  → Setup expired — abandon | {candle['time']}")
+                print(f"  → Window expired — abandon | {candle['time']}")
             state = "INACTIVE"
-            prev_m5 = mother_bar = setup_expiry = None
-            session_low = float("inf")
+            marked_high = marked_low = setup_expiry = None
             continue
 
-        # RSI drops below entry threshold → activate
+        # RSI closes below threshold → activate watch window
         if h1_rsi < RSI_OVERSOLD and state == "INACTIVE":
             expiry = candle["time"] + pd.Timedelta(hours=SETUP_WINDOW_BARS)
             print(f"[RSI ACTIVE] {symbol} | {candle['time']} | H1 RSI={round(h1_rsi, 2)} | Expires {expiry}")
-            state       = "WATCHING"
-            prev_m5     = candle
+            state        = "WATCHING"
             setup_expiry = expiry
-            session_low = candle["low"]
             continue
-
-        # Track lowest M5 low since RSI trigger
-        if state in ("WATCHING", "TRIGGERED"):
-            session_low = min(session_low, candle["low"])
 
         if state == "INACTIVE":
             continue
 
-        # ── WATCHING: detect inside bar near the session low ─────────────────
+        # ── WATCHING: detect 3 consecutive higher highs ─────────────────────
         if state == "WATCHING":
-            near_low = prev_m5["low"] <= session_low + pip_size(symbol) * 15
-            if (candle["high"] < prev_m5["high"] and candle["low"] > prev_m5["low"]
-                    and near_low):
-                mother_bar = prev_m5
-                print(f"  → Inside bar | Mother {mother_bar['time']} H={round(mother_bar['high'],5)} L={round(mother_bar['low'],5)} | Inside {candle['time']} | session_low={round(session_low,5)}")
-                state = "TRIGGERED"
-            else:
-                prev_m5 = candle
+            if three_higher_highs(i):
+                marked_high = candle["high"]
+                marked_low  = candle["low"]
+                print(f"  → 3 higher highs | mark high={round(marked_high,5)} low(SL)={round(marked_low,5)} at {candle['time']}")
+                state = "ARMED"
             continue
 
-        # ── TRIGGERED: wait for close above mother bar high ──────────────────
-        if state == "TRIGGERED":
-            # New low below mother bar → setup invalidated, look for a lower one
-            if candle["low"] < mother_bar["low"]:
+        # ── ARMED: enter on intrabar break above marked high ────────────────
+        if state == "ARMED":
+            if candle["high"] > marked_high:
+                entry_price = marked_high
+                sl_price    = marked_low
+                sl_distance = entry_price - sl_price
+
+                if sl_distance <= 0:
+                    state = "WATCHING"
+                    marked_high = marked_low = None
+                    continue
+
+                tp_price   = entry_price + sl_distance * TARGET_RR
+                rr         = TARGET_RR
+                entry_time = candle["time"]
+                saved_high = marked_high
+                saved_low  = marked_low
+
+                print(f"  → ENTRY | {entry_time} | Entry={round(entry_price,5)} SL={round(sl_price,5)} TP={round(tp_price,5)}")
+
+                # Walk-forward simulation: trail SL up to each completed candle's low
+                result     = "OPEN"
+                exit_price = None
+                exit_time  = None
+                current_sl = sl_price
+
+                for fwd_idx in range(i + 1, len(m5)):
+                    row = m5.iloc[fwd_idx]
+                    if row["low"] <= current_sl:
+                        result = "SL"; exit_price = current_sl; exit_time = row["time"]; break
+                    if row["high"] >= tp_price:
+                        result = "TP"; exit_price = tp_price;   exit_time = row["time"]; break
+                    # Trail: move SL up to this completed candle's low (only upward)
+                    if USE_TRAILING_SL and row["low"] > current_sl:
+                        current_sl = row["low"]
+
+                if result == "OPEN":
+                    state = "INACTIVE"
+                    marked_high = marked_low = setup_expiry = None
+                    continue
+
+                trade_open_until = exit_time
+                duration_mins    = int((exit_time - entry_time).total_seconds() / 60)
+                rr_achieved      = (exit_price - entry_price) / sl_distance
+                pnl_usd          = round(FIXED_RISK_USD * rr_achieved, 2)
+                if result == "SL" and exit_price > entry_price:
+                    result = "TS"   # trailing stop in profit
+
+                trades.append({
+                    "symbol":        symbol,
+                    "entry_time":    entry_time,
+                    "exit_time":     exit_time,
+                    "entry_price":   round(entry_price, 5),
+                    "sl_price":      round(sl_price, 5),
+                    "tp_price":      round(tp_price, 5),
+                    "exit_price":    round(exit_price, 5),
+                    "sl_pips":       pips(sl_distance, symbol),
+                    "rr_planned":    rr,
+                    "rr_achieved":   round(rr_achieved, 2),
+                    "result":        result,
+                    "pnl_usd":       pnl_usd,
+                    "duration_mins": duration_mins,
+                    "h1_rsi":        round(h1_rsi, 2),
+                    "mother_high":   round(saved_high, 5),
+                    "mother_low":    round(saved_low, 5),
+                })
+
+                # Keep scanning for more trades within the same window
                 state = "WATCHING"
-                prev_m5 = candle
-                mother_bar = None
+                marked_high = marked_low = None
                 continue
 
-            min_breakout = mother_bar["high"] + pip_size(symbol)
-            if candle["close"] <= min_breakout:
-                continue
-
-            entry_price = candle["close"]
-            sl_price    = mother_bar["low"]
-            sl_distance = entry_price - sl_price
-
-            if sl_distance <= 0:
-                state = "WATCHING"
-                prev_m5 = candle
-                mother_bar = None
-                continue
-
-            tp_price       = entry_price + sl_distance * TARGET_RR
-            rr             = TARGET_RR
-            entry_time     = candle["time"]
-            saved_m_high   = mother_bar["high"]
-            saved_m_low    = mother_bar["low"]
-
-            print(f"  → ENTRY | {entry_time} | Entry={round(entry_price,5)} SL={round(sl_price,5)} TP={round(tp_price,5)}")
-
-            # Walk-forward simulation with trailing SL
-            m5_fwd     = m5.iloc[i + 1:].reset_index(drop=True)
-            result     = "OPEN"
-            exit_price = None
-            exit_time  = None
-            current_sl = sl_price
-
-            for fwd_idx, row in m5_fwd.iterrows():
-                if row["low"] <= current_sl:
-                    result = "SL"; exit_price = current_sl; exit_time = row["time"]; break
-                if row["high"] >= tp_price:
-                    result = "TP"; exit_price = tp_price;   exit_time = row["time"]; break
-                # Confirm swing low SWING_LOOKBACK candles ago and trail SL up
-                check_idx = fwd_idx - SWING_LOOKBACK
-                if USE_TRAILING_SL and check_idx >= SWING_LOOKBACK:
-                    cand  = m5_fwd.iloc[check_idx]["low"]
-                    left  = [m5_fwd.iloc[j]["low"] for j in range(check_idx - SWING_LOOKBACK, check_idx)]
-                    right = [m5_fwd.iloc[j]["low"] for j in range(check_idx + 1, check_idx + SWING_LOOKBACK + 1)]
-                    if all(cand < l for l in left) and all(cand < r for r in right) and cand > current_sl:
-                        current_sl = cand
-                        print(f"    → Trail SL → {round(current_sl,5)} at {m5_fwd.iloc[check_idx]['time']}")
-
-            state = "INACTIVE"
-            prev_m5 = mother_bar = setup_expiry = None
-            session_low = float("inf")
-
-            if result == "OPEN":
-                continue
-
-            trade_open_until = exit_time
-            duration_mins    = int((exit_time - entry_time).total_seconds() / 60)
-            rr_achieved      = (exit_price - entry_price) / sl_distance
-            pnl_usd          = round(FIXED_RISK_USD * rr_achieved, 2)
-            # Relabel: exit above entry via trailing stop is a profit, not a loss
-            if result == "SL" and exit_price > entry_price:
-                result = "TS"   # trailing stop in profit
-
-            trades.append({
-                "symbol":        symbol,
-                "entry_time":    entry_time,
-                "exit_time":     exit_time,
-                "entry_price":   round(entry_price, 5),
-                "sl_price":      round(sl_price, 5),
-                "tp_price":      round(tp_price, 5),
-                "exit_price":    round(exit_price, 5),
-                "sl_pips":       pips(sl_distance, symbol),
-                "rr_planned":    rr,
-                "rr_achieved":   round((exit_price - entry_price) / sl_distance, 2),
-                "result":        result,
-                "pnl_usd":       pnl_usd,
-                "duration_mins": duration_mins,
-                "h1_rsi":        round(h1_rsi, 2),
-                "mother_high":   round(saved_m_high, 5),
-                "mother_low":    round(saved_m_low, 5),
-            })
+            # No break yet — re-arm if a fresh 3 higher highs forms
+            if three_higher_highs(i):
+                marked_high = candle["high"]
+                marked_low  = candle["low"]
+            continue
 
     return trades
 
