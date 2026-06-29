@@ -77,6 +77,7 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
 
                 if prior_highs:
                     sh1 = prior_highs[-1]
+                    print(f"  → SH1 found: {sh1['price']} at {sh1['time']}")
                     active_setups[symbol] = {
                         "setup_bar":  h1_idx,
                         "setup_time": h1_candle["time"],
@@ -85,6 +86,8 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
                         "sh1_time":   sh1["time"],
                         "rsi":        round(rsi_val, 2),
                     }
+                else:
+                    print(f"  → No SH1 found — setup skipped")
         else:
             # Expire check
             setup = active_setups[symbol]
@@ -118,17 +121,20 @@ def run_backtest(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
         swing_lows    = get_swing_low_levels(df_post_low)
 
         if len(swing_lows) < 2:
+            print(f"  → [{setup_time}] Not enough swing lows on M5 (found {len(swing_lows)})")
             continue
 
         last_sl = swing_lows[-1]
         prev_sl = swing_lows[-2]
 
         if last_sl["price"] <= prev_sl["price"]:
+            print(f"  → [{setup_time}] No higher low: {last_sl['price']} <= {prev_sl['price']}")
             continue
 
         # Check if last m5 candle closes above SH1
         last_m5 = m5_slice.iloc[-1]
         if last_m5["close"] <= sh1_price:
+            print(f"  → [{setup_time}] M5 close {last_m5['close']} not above SH1 {sh1_price}")
             continue
 
         entry_price = last_m5["close"]
