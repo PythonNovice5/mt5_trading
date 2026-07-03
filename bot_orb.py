@@ -18,7 +18,9 @@ Run on the Windows server with MT5 open & logged in:
 """
 
 import sys
+import os
 import time
+import logging
 from datetime import datetime, timedelta
 
 import MetaTrader5 as mt5
@@ -32,6 +34,31 @@ from execution_bot import (
 
 MAGIC     = 26073
 POLL_SEC  = 15
+
+# ── LOGGER (console + logs/orb_bot.log) ──
+os.makedirs("logs", exist_ok=True)
+logger = logging.getLogger("orb")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _fmt = logging.Formatter("%(asctime)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+    _fh = logging.FileHandler("logs/orb_bot.log"); _fh.setFormatter(_fmt); logger.addHandler(_fh)
+    _sh = logging.StreamHandler();                 _sh.setFormatter(_fmt); logger.addHandler(_sh)
+
+def log(msg: str):
+    logger.info(msg)
+
+
+def is_market_open(symbol: str) -> bool:
+    """Detect a live market by checking that quotes are actively updating."""
+    info = mt5.symbol_info(symbol)
+    if info is None or info.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
+        return False
+    t1 = mt5.symbol_info_tick(symbol)
+    time.sleep(2)
+    t2 = mt5.symbol_info_tick(symbol)
+    if t1 is None or t2 is None:
+        return False
+    return t2.time_msc != t1.time_msc   # quote advanced → market is live
 
 
 def _t(hhmm: str) -> timedelta:
@@ -69,7 +96,7 @@ def orb_position(symbol: str):
 
 def place_market(symbol: str, direction: str, sl_price: float) -> bool:
     if not mt5.symbol_select(symbol, True):
-        print(f"  ! could not select {symbol}")
+        log(f"  ! could not select {symbol}")
         return False
     tick = mt5.symbol_info_tick(symbol)
     info = mt5.symbol_info(symbol)
@@ -84,7 +111,7 @@ def place_market(symbol: str, direction: str, sl_price: float) -> bool:
     sl_points = abs(price - sl_price) / info.point
     lot = calculate_lot_size(symbol, sl_points)
     if lot == 0:
-        print("  ! lot size 0 — skipping")
+        log("  ! lot size 0 — skipping")
         return False
 
     base = {
@@ -106,12 +133,12 @@ def place_market(symbol: str, direction: str, sl_price: float) -> bool:
         if r is None:
             continue
         if r.retcode == mt5.TRADE_RETCODE_DONE:
-            print(f"  ✅ {direction} filled @ {r.price} | SL {sl_price} | lot {lot} | #{r.order}")
+            log(f"  ✅ {direction} filled @ {r.price} | SL {sl_price} | lot {lot} | #{r.order}")
             return True
         if r.retcode != mt5.TRADE_RETCODE_INVALID_FILL:
-            print(f"  ❌ order failed retcode={r.retcode} {r.comment}")
+            log(f"  ❌ order failed retcode={r.retcode} {r.comment}")
             return False
-    print(f"  ❌ order failed — no supported filling mode")
+    log(f"  ❌ order failed — no supported filling mode")
     return False
 
 
@@ -136,15 +163,20 @@ def close_orb(symbol: str):
         "comment":  "ORB EOD exit",
         "type_filling": mt5.ORDER_FILLING_IOC,
     })
-    print(f"  ⏱ EOD close #{pos.ticket} @ {price} | P&L ${pos.profit:.2f} | retcode {r.retcode}")
+    log(f"  ⏱ EOD close #{pos.ticket} @ {price} | P&L ${pos.profit:.2f} | retcode {r.retcode}")
 
 
 def run(symbol: str):
-    print("\n" + "=" * 55)
-    print(f"  ORB Reversal Live Bot — {symbol}")
-    print("=" * 55)
+    log("\n" + "=" * 55)
+    log(f"  ORB Reversal Live Bot — {symbol}")
+    log("=" * 55)
     if not connect():
         return
+
+    market = is_market_open(symbol)
+    log(f"Market is {'OPEN' if market else 'CLOSED'} for {symbol}.")
+    if not market:
+        log("Not a live session right now — waiting; will trade when it opens.")
 
     open_off = _t(US_OPEN_TIME)
     rng_len  = timedelta(minutes=ORB_RANGE_MINUTES)
@@ -160,13 +192,26 @@ def run(symbol: str):
             "start_equity": get_account_info()["equity"],
         })
 
-    print(f"\nPolling every {POLL_SEC}s. US open {US_OPEN_TIME}, exit {ORB_EXIT_TIME} (broker time).\n")
+    log(f"Polling every {POLL_SEC}s. US open {US_OPEN_TIME}, exit {ORB_EXIT_TIME} (broker time).")
+
+    last_hb     = None
+    last_market = market
 
     while True:
         try:
             now = broker_now(symbol)
             if now is None:
+                log("No tick — market likely closed; waiting.")
                 time.sleep(POLL_SEC); continue
+
+            # Heartbeat + market open/close transition (every ~30 min)
+            if last_hb is None or (now - last_hb).total_seconds() >= 1800:
+                mkt = is_market_open(symbol)
+                if mkt != last_market:
+                    log(f"{now} | market {'OPENED' if mkt else 'CLOSED'}")
+                    last_market = mkt
+                log(f"{now} | heartbeat | market={'OPEN' if mkt else 'CLOSED'}")
+                last_hb = now
 
             today   = now.normalize() if isinstance(now, pd.Timestamp) else datetime(now.year, now.month, now.day)
             open_dt = today + open_off
@@ -182,14 +227,14 @@ def run(symbol: str):
             # Reconcile after a restart: if a position is already open, mark entered
             if orb_position(symbol) is not None and not st["entered"]:
                 st["entered"] = True
-                print(f"{now} | existing ORB position found — reconciled")
+                log(f"{now} | existing ORB position found — reconciled")
 
             # Daily loss kill-switch: halt (and flatten) if equity down too much
             if not st["skipped"] and st["start_equity"]:
                 equity = get_account_info()["equity"]
                 dd_pct = (st["start_equity"] - equity) / st["start_equity"] * 100
                 if dd_pct >= MAX_DAILY_LOSS_PERCENT:
-                    print(f"{now} | daily loss {dd_pct:.2f}% >= {MAX_DAILY_LOSS_PERCENT}% — HALT day")
+                    log(f"{now} | daily loss {dd_pct:.2f}% >= {MAX_DAILY_LOSS_PERCENT}% — HALT day")
                     close_orb(symbol)
                     st["skipped"] = True
                     st["closed"]  = True
@@ -199,7 +244,7 @@ def run(symbol: str):
                 bar = get_m15_bar(symbol, open_dt)
                 if bar is not None:
                     st["range"] = (float(bar["high"]), float(bar["low"]))
-                    print(f"{now} | range HIGH {st['range'][0]} LOW {st['range'][1]}")
+                    log(f"{now} | range HIGH {st['range'][0]} LOW {st['range'][1]}")
 
             # 2) After 2nd candle closes, decide direction
             if st["range"] and st["direction"] is None and not st["skipped"] and now >= c2_end:
@@ -210,10 +255,10 @@ def run(symbol: str):
                     broke_low  = float(bar2["low"])  < rl
                     if broke_high == broke_low:
                         st["skipped"] = True
-                        print(f"{now} | both/neither broken → skip day")
+                        log(f"{now} | both/neither broken → skip day")
                     else:
                         st["direction"] = "SHORT" if broke_high else "LONG"
-                        print(f"{now} | {st['direction']} bias set")
+                        log(f"{now} | {st['direction']} bias set")
 
             # 3) Wait for opposite-side breach → enter (once, and only if flat)
             if (st["direction"] and not st["entered"] and not st["skipped"]
@@ -237,14 +282,14 @@ def run(symbol: str):
             time.sleep(POLL_SEC)
 
         except KeyboardInterrupt:
-            print("\nStopping bot...")
+            log("\nStopping bot...")
             break
         except Exception as e:
-            print(f"loop error: {e}")
+            log(f"loop error: {e}")
             time.sleep(POLL_SEC)
 
     disconnect()
-    print("Bot stopped.")
+    log("Bot stopped.")
 
 
 if __name__ == "__main__":
