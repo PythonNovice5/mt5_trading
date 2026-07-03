@@ -44,6 +44,11 @@ MIN_SL_PIPS        = 5.0     # Minimum SL distance; widen SL to this if marked c
 RECT_MIN_CANDLES   = 5       # Min M5 candles to form a valid rectangle
 RECT_MAX_RANGE_PCT = 0.001   # Max range as % of price (0.1%)
 
+# ── OPENING RANGE REVERSAL (NDX100) ──
+US_OPEN_TIME       = "16:30"  # Broker-time of US cash open (9:30 ET). Volume-confirmed.
+ORB_EXIT_TIME      = "22:55"  # Exit 5 min before US close (23:00 broker time)
+ORB_RANGE_MINUTES  = 15       # Length of the opening-range candle
+
 # ── TIMEFRAMES ──
 SETUP_TF           = "H1"    # Timeframe for RSI setup scan
 ENTRY_TF           = "M5"    # Timeframe for entry signal

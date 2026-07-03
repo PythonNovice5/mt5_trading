@@ -240,16 +240,16 @@ def compute_stats(trades: list[dict]) -> dict:
         max_dd  = max(max_dd, peak - equity)
 
     max_consec_loss = cur = 0
-    for r in df["result"]:
-        if r == "SL":
+    for pnl in df["pnl_usd"]:
+        if pnl <= 0:
             cur += 1
             max_consec_loss = max(max_consec_loss, cur)
         else:
             cur = 0
 
     by_symbol = df.groupby("symbol").agg(
-        trades=("result", "count"),
-        wins=("result", lambda x: (x == "TP").sum()),
+        trades=("pnl_usd", "count"),
+        wins=("pnl_usd", lambda x: (x > 0).sum()),
         pnl=("pnl_usd", "sum"),
     ).round(2).to_dict("index")
 
