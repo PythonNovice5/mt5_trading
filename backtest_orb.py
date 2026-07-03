@@ -49,8 +49,8 @@ def run_orb(symbol: str, m5: pd.DataFrame) -> list[dict]:
 
         c1 = day_df[(day_df["time"] >= open_dt) & (day_df["time"] < c1_end)]
         c2 = day_df[(day_df["time"] >= c1_end)  & (day_df["time"] < c2_end)]
-        if len(c1) < 3 or len(c2) < 3:
-            continue  # incomplete session data
+        if len(c1) == 0 or len(c2) == 0:
+            continue  # incomplete session data (works for M5=3 candles or M15=1)
 
         range_high = c1["high"].max()
         range_low  = c1["low"].min()
@@ -135,13 +135,14 @@ def run_orb(symbol: str, m5: pd.DataFrame) -> list[dict]:
 if __name__ == "__main__":
     symbol = sys.argv[1] if len(sys.argv) > 1 else "NDX100"
     years  = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    tf     = sys.argv[3].upper() if len(sys.argv) > 3 else "M5"
 
-    print(f"\nLoading {symbol} M5 data...")
-    m5 = load_csv(symbol, "M5", years)
+    print(f"\nLoading {symbol} {tf} data...")
+    m5 = load_csv(symbol, tf, years)
     if m5 is None:
         sys.exit(1)
 
-    print(f"M5 candles: {len(m5)}")
+    print(f"{tf} candles: {len(m5)}")
     print(f"Running opening-range reversal backtest...\n")
 
     print(f"Data span : {m5['time'].min()}  →  {m5['time'].max()}")
@@ -177,4 +178,4 @@ if __name__ == "__main__":
     print(f"\nGenerating HTML report...")
 
     from report import generate_report
-    generate_report(stats, symbol, "ORB", "M5", years)
+    generate_report(stats, symbol, "ORB", tf, years)
