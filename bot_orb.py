@@ -1,5 +1,5 @@
 """
-Live bot — Opening-Range Failed-Breakout Reversal (NDX100).
+Live bot - Opening-Range Failed-Breakout Reversal (NDX100).
 
 Daily flow (broker time), mirrors backtest_orb.py:
   1. First 15-min candle after US open (16:30) = opening range.
@@ -10,7 +10,7 @@ Daily flow (broker time), mirrors backtest_orb.py:
        SHORT: sell when price <= range_low
        LONG : buy  when price >= range_high
   4. SL = midpoint of the range (half-range stop). No TP.
-  5. Exit: flat at ORB_EXIT_TIME (22:55) or SL — one trade per day.
+  5. Exit: flat at ORB_EXIT_TIME (22:55) or SL - one trade per day.
 
 Run on the Windows server with MT5 open & logged in:
     python bot_orb.py            # NDX100
@@ -21,7 +21,7 @@ import sys
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import MetaTrader5 as mt5
 import pandas as pd
@@ -41,7 +41,7 @@ logger = logging.getLogger("orb")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     _fmt = logging.Formatter("%(asctime)s | %(message)s", "%Y-%m-%d %H:%M:%S")
-    _fh = logging.FileHandler("logs/orb_bot.log"); _fh.setFormatter(_fmt); logger.addHandler(_fh)
+    _fh = logging.FileHandler("logs/orb_bot.log", encoding="utf-8"); _fh.setFormatter(_fmt); logger.addHandler(_fh)
     _sh = logging.StreamHandler();                 _sh.setFormatter(_fmt); logger.addHandler(_sh)
 
 def log(msg: str):
@@ -58,7 +58,7 @@ def is_market_open(symbol: str) -> bool:
     t2 = mt5.symbol_info_tick(symbol)
     if t1 is None or t2 is None:
         return False
-    return t2.time_msc != t1.time_msc   # quote advanced → market is live
+    return t2.time_msc != t1.time_msc   # quote advanced -> market is live
 
 
 def _t(hhmm: str) -> timedelta:
@@ -70,7 +70,7 @@ def broker_now(symbol: str) -> datetime | None:
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         return None
-    return datetime.utcfromtimestamp(tick.time)   # MT5 epoch = broker wall time
+    return datetime.fromtimestamp(tick.time, tz=timezone.utc).replace(tzinfo=None)  # broker wall time
 
 
 def get_m15_bar(symbol: str, bar_open: datetime):
@@ -111,7 +111,7 @@ def place_market(symbol: str, direction: str, sl_price: float) -> bool:
     sl_points = abs(price - sl_price) / info.point
     lot = calculate_lot_size(symbol, sl_points)
     if lot == 0:
-        log("  ! lot size 0 — skipping")
+        log("  ! lot size 0 - skipping")
         return False
 
     base = {
@@ -121,24 +121,24 @@ def place_market(symbol: str, direction: str, sl_price: float) -> bool:
         "type":      order_type,
         "price":     price,
         "sl":        sl_price,
-        "tp":        0.0,            # no TP — time-based exit
+        "tp":        0.0,            # no TP - time-based exit
         "deviation": 20,
         "magic":     MAGIC,
         "comment":   "ORB reversal",
         "type_time": mt5.ORDER_TIME_GTC,
     }
-    # Try filling modes in order — brokers differ (IOC / FOK / RETURN)
+    # Try filling modes in order - brokers differ (IOC / FOK / RETURN)
     for fill in (mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN):
         r = mt5.order_send({**base, "type_filling": fill})
         if r is None:
             continue
         if r.retcode == mt5.TRADE_RETCODE_DONE:
-            log(f"  ✅ {direction} filled @ {r.price} | SL {sl_price} | lot {lot} | #{r.order}")
+            log(f"  [OK] {direction} filled @ {r.price} | SL {sl_price} | lot {lot} | #{r.order}")
             return True
         if r.retcode != mt5.TRADE_RETCODE_INVALID_FILL:
-            log(f"  ❌ order failed retcode={r.retcode} {r.comment}")
+            log(f"  [FAIL] order failed retcode={r.retcode} {r.comment}")
             return False
-    log(f"  ❌ order failed — no supported filling mode")
+    log(f"  [FAIL] order failed - no supported filling mode")
     return False
 
 
@@ -163,12 +163,12 @@ def close_orb(symbol: str):
         "comment":  "ORB EOD exit",
         "type_filling": mt5.ORDER_FILLING_IOC,
     })
-    log(f"  ⏱ EOD close #{pos.ticket} @ {price} | P&L ${pos.profit:.2f} | retcode {r.retcode}")
+    log(f"  [EOD] EOD close #{pos.ticket} @ {price} | P&L ${pos.profit:.2f} | retcode {r.retcode}")
 
 
 def run(symbol: str):
     log("\n" + "=" * 55)
-    log(f"  ORB Reversal Live Bot — {symbol}")
+    log(f"  ORB Reversal Live Bot - {symbol}")
     log("=" * 55)
     if not connect():
         return
@@ -176,7 +176,7 @@ def run(symbol: str):
     market = is_market_open(symbol)
     log(f"Market is {'OPEN' if market else 'CLOSED'} for {symbol}.")
     if not market:
-        log("Not a live session right now — waiting; will trade when it opens.")
+        log("Not a live session right now - waiting; will trade when it opens.")
 
     open_off = _t(US_OPEN_TIME)
     rng_len  = timedelta(minutes=ORB_RANGE_MINUTES)
@@ -194,26 +194,29 @@ def run(symbol: str):
 
     log(f"Polling every {POLL_SEC}s. US open {US_OPEN_TIME}, exit {ORB_EXIT_TIME} (broker time).")
 
-    last_hb     = None
-    last_market = market
+    last_hb_wall = 0.0
+    last_tick_t  = None
 
     while True:
         try:
             now = broker_now(symbol)
-            if now is None:
-                log("No tick — market likely closed; waiting.")
-                time.sleep(POLL_SEC); continue
+            # "live" = quote advanced since last poll → market is actively trading
+            live = now is not None and last_tick_t is not None and now != last_tick_t
+            last_tick_t = now
 
-            # Heartbeat + market open/close transition (every ~30 min)
-            if last_hb is None or (now - last_hb).total_seconds() >= 1800:
-                mkt = is_market_open(symbol)
-                if mkt != last_market:
-                    log(f"{now} | market {'OPENED' if mkt else 'CLOSED'}")
-                    last_market = mkt
-                log(f"{now} | heartbeat | market={'OPEN' if mkt else 'CLOSED'}")
-                last_hb = now
+            # Wall-clock heartbeat every 30 min (fires even when market is closed)
+            if time.time() - last_hb_wall >= 1800:
+                stt = day_state
+                summary = (f"range={stt.get('range')} dir={stt.get('direction')} "
+                           f"entered={stt.get('entered')} skipped={stt.get('skipped')}"
+                           if stt.get("date") else "no active day")
+                log(f"heartbeat | market={'OPEN' if live else 'CLOSED'} | broker_now={now} | {summary}")
+                last_hb_wall = time.time()
 
-            today   = now.normalize() if isinstance(now, pd.Timestamp) else datetime(now.year, now.month, now.day)
+            if not live:
+                time.sleep(POLL_SEC); continue   # market not ticking → wait
+
+            today   = datetime(now.year, now.month, now.day)
             open_dt = today + open_off
             c2_open = open_dt + rng_len
             c2_end  = c2_open + rng_len
@@ -227,14 +230,14 @@ def run(symbol: str):
             # Reconcile after a restart: if a position is already open, mark entered
             if orb_position(symbol) is not None and not st["entered"]:
                 st["entered"] = True
-                log(f"{now} | existing ORB position found — reconciled")
+                log(f"{now} | existing ORB position found - reconciled")
 
             # Daily loss kill-switch: halt (and flatten) if equity down too much
             if not st["skipped"] and st["start_equity"]:
                 equity = get_account_info()["equity"]
                 dd_pct = (st["start_equity"] - equity) / st["start_equity"] * 100
                 if dd_pct >= MAX_DAILY_LOSS_PERCENT:
-                    log(f"{now} | daily loss {dd_pct:.2f}% >= {MAX_DAILY_LOSS_PERCENT}% — HALT day")
+                    log(f"{now} | daily loss {dd_pct:.2f}% >= {MAX_DAILY_LOSS_PERCENT}% - HALT day")
                     close_orb(symbol)
                     st["skipped"] = True
                     st["closed"]  = True
@@ -255,12 +258,12 @@ def run(symbol: str):
                     broke_low  = float(bar2["low"])  < rl
                     if broke_high == broke_low:
                         st["skipped"] = True
-                        log(f"{now} | both/neither broken → skip day")
+                        log(f"{now} | both/neither broken -> skip day")
                     else:
                         st["direction"] = "SHORT" if broke_high else "LONG"
                         log(f"{now} | {st['direction']} bias set")
 
-            # 3) Wait for opposite-side breach → enter (once, and only if flat)
+            # 3) Wait for opposite-side breach -> enter (once, and only if flat)
             if (st["direction"] and not st["entered"] and not st["skipped"]
                     and c2_end <= now < exit_dt and orb_position(symbol) is None):
                 rh, rl = st["range"]
