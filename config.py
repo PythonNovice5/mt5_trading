@@ -48,6 +48,7 @@ RECT_MAX_RANGE_PCT = 0.001   # Max range as % of price (0.1%)
 US_OPEN_TIME       = "16:30"  # Broker-time of US cash open (9:30 ET). Volume-confirmed.
 ORB_EXIT_TIME      = "22:55"  # Exit 5 min before US close (23:00 broker time)
 ORB_RANGE_MINUTES  = 15       # Length of the opening-range candle
+ORB_BREAKEVEN_PCT  = 0.0034   # Move SL to entry once price moves this % in favor (~100 pts @ 29500)
 
 # ── TIMEFRAMES ──
 SETUP_TF           = "H1"    # Timeframe for RSI setup scan
