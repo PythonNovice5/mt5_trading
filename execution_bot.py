@@ -15,7 +15,7 @@ from datetime import datetime
 # CONFIGURATION — Edit these values
 # ──────────────────────────────────────────────
 
-RISK_PERCENT = 0.25          # Risk per trade (% of balance)
+RISK_PERCENT = 0.8           # Risk per trade (% of balance) → $40 on $5,000
 MAX_DAILY_LOSS_PERCENT = 4.0 # FundingPips daily drawdown limit (%)
 MAX_TOTAL_LOSS_PERCENT = 8.0 # FundingPips max total drawdown limit (%)
 
