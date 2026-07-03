@@ -62,10 +62,11 @@ def run_orb(symbol: str, m5: pd.DataFrame) -> list[dict]:
             continue  # both or neither → skip
 
         direction = "SHORT" if broke_high else "LONG"
-        sl_price  = range_high if direction == "SHORT" else range_low
-        sl_dist   = range_high - range_low
+        sl_dist   = (range_high - range_low) / 2      # half of the opening range
         if sl_dist <= 0:
             continue
+        # Entry is at the opposite range edge; SL sits half a range away (midpoint)
+        sl_price  = (range_low + sl_dist) if direction == "SHORT" else (range_high - sl_dist)
 
         # ── Look for reversal entry from after the 2nd candle to exit time ──
         monitor = day_df[(day_df["time"] >= c2_end) & (day_df["time"] <= exit_dt)]
