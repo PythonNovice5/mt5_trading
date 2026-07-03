@@ -21,10 +21,7 @@ Usage:
 import sys
 import pandas as pd
 
-from config import (
-    US_OPEN_TIME, ORB_EXIT_TIME, ORB_RANGE_MINUTES, FIXED_RISK_USD,
-    ORB_BREAKEVEN_PCT,
-)
+from config import US_OPEN_TIME, ORB_EXIT_TIME, ORB_RANGE_MINUTES, FIXED_RISK_USD
 from backtest import load_csv, compute_stats
 
 
@@ -91,21 +88,14 @@ def run_orb(symbol: str, m5: pd.DataFrame) -> list[dict]:
         result = "EOD"
         exit_price = None
         exit_time  = None
-        current_sl = sl_price
-        be_trigger = entry_price * ORB_BREAKEVEN_PCT   # favorable move to reach breakeven
 
         for _, row in fwd.iterrows():
-            if direction == "SHORT" and row["high"] >= current_sl:
-                result, exit_price, exit_time = "SL", current_sl, row["time"]
+            if direction == "SHORT" and row["high"] >= sl_price:
+                result, exit_price, exit_time = "SL", sl_price, row["time"]
                 break
-            if direction == "LONG" and row["low"] <= current_sl:
-                result, exit_price, exit_time = "SL", current_sl, row["time"]
+            if direction == "LONG" and row["low"] <= sl_price:
+                result, exit_price, exit_time = "SL", sl_price, row["time"]
                 break
-            # Move SL to breakeven once price has moved far enough in our favor
-            if direction == "SHORT" and (entry_price - row["low"]) >= be_trigger:
-                current_sl = min(current_sl, entry_price)
-            if direction == "LONG" and (row["high"] - entry_price) >= be_trigger:
-                current_sl = max(current_sl, entry_price)
 
         if result == "EOD":
             if len(fwd) == 0:
