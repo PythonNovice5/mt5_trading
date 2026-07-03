@@ -94,12 +94,20 @@ def orb_position(symbol: str):
     return None
 
 
-def traded_today(symbol: str, day_start: datetime) -> bool:
-    """True if an ORB deal for this symbol already happened today (survives restart)."""
-    deals = mt5.history_deals_get(day_start, day_start + timedelta(days=1))
-    if not deals:
+STATE_FILE = "logs/orb_last_trade.txt"
+
+def mark_traded(day) -> None:
+    """Persist the date we last entered a trade (survives restart)."""
+    with open(STATE_FILE, "w") as f:
+        f.write(str(day))
+
+def already_traded(day) -> bool:
+    """True if our own flag says we already traded on this date."""
+    try:
+        with open(STATE_FILE) as f:
+            return f.read().strip() == str(day)
+    except FileNotFoundError:
         return False
-    return any(d.magic == MAGIC and d.symbol == symbol for d in deals)
 
 
 def place_market(symbol: str, direction: str, sl_price: float) -> bool:
@@ -240,10 +248,10 @@ def run(symbol: str):
                 if orb_position(symbol) is not None:
                     st["entered"] = True
                     log(f"{now} | existing ORB position found - reconciled")
-                elif traded_today(symbol, today):
+                elif already_traded(today.date()):
                     st["entered"] = True
                     st["closed"]  = True
-                    log(f"{now} | already traded today - no re-entry")
+                    log(f"{now} | already traded today (state flag) - no re-entry")
 
             # Daily loss kill-switch: halt (and flatten) if equity down too much
             if not st["skipped"] and st["start_equity"]:
@@ -286,9 +294,11 @@ def run(symbol: str):
                     if st["direction"] == "SHORT" and tick.bid <= rl:
                         if place_market(symbol, "SHORT", mid):
                             st["entered"] = True
+                            mark_traded(today.date())
                     elif st["direction"] == "LONG" and tick.ask >= rh:
                         if place_market(symbol, "LONG", mid):
                             st["entered"] = True
+                            mark_traded(today.date())
 
             # 4) Flat at exit time
             if now >= exit_dt and not st["closed"]:
