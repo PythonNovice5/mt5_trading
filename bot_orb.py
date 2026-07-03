@@ -25,7 +25,10 @@ import MetaTrader5 as mt5
 import pandas as pd
 
 from config import US_OPEN_TIME, ORB_EXIT_TIME, ORB_RANGE_MINUTES
-from execution_bot import connect, disconnect, calculate_lot_size
+from execution_bot import (
+    connect, disconnect, calculate_lot_size, get_account_info,
+    MAX_DAILY_LOSS_PERCENT,
+)
 
 MAGIC     = 26073
 POLL_SEC  = 15
@@ -84,25 +87,31 @@ def place_market(symbol: str, direction: str, sl_price: float) -> bool:
         print("  ! lot size 0 — skipping")
         return False
 
-    request = {
-        "action":       mt5.TRADE_ACTION_DEAL,
-        "symbol":       symbol,
-        "volume":       lot,
-        "type":         order_type,
-        "price":        price,
-        "sl":           sl_price,
-        "tp":           0.0,            # no TP — time-based exit
-        "deviation":    20,
-        "magic":        MAGIC,
-        "comment":      "ORB reversal",
-        "type_time":    mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+    base = {
+        "action":    mt5.TRADE_ACTION_DEAL,
+        "symbol":    symbol,
+        "volume":    lot,
+        "type":      order_type,
+        "price":     price,
+        "sl":        sl_price,
+        "tp":        0.0,            # no TP — time-based exit
+        "deviation": 20,
+        "magic":     MAGIC,
+        "comment":   "ORB reversal",
+        "type_time": mt5.ORDER_TIME_GTC,
     }
-    r = mt5.order_send(request)
-    if r.retcode == mt5.TRADE_RETCODE_DONE:
-        print(f"  ✅ {direction} filled @ {r.price} | SL {sl_price} | lot {lot} | #{r.order}")
-        return True
-    print(f"  ❌ order failed retcode={r.retcode} {r.comment}")
+    # Try filling modes in order — brokers differ (IOC / FOK / RETURN)
+    for fill in (mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN):
+        r = mt5.order_send({**base, "type_filling": fill})
+        if r is None:
+            continue
+        if r.retcode == mt5.TRADE_RETCODE_DONE:
+            print(f"  ✅ {direction} filled @ {r.price} | SL {sl_price} | lot {lot} | #{r.order}")
+            return True
+        if r.retcode != mt5.TRADE_RETCODE_INVALID_FILL:
+            print(f"  ❌ order failed retcode={r.retcode} {r.comment}")
+            return False
+    print(f"  ❌ order failed — no supported filling mode")
     return False
 
 
@@ -148,6 +157,7 @@ def run(symbol: str):
         day_state.update({
             "date": d, "range": None, "direction": None,
             "entered": False, "skipped": False, "closed": False,
+            "start_equity": get_account_info()["equity"],
         })
 
     print(f"\nPolling every {POLL_SEC}s. US open {US_OPEN_TIME}, exit {ORB_EXIT_TIME} (broker time).\n")
@@ -168,6 +178,21 @@ def run(symbol: str):
                 reset(today.date())
 
             st = day_state
+
+            # Reconcile after a restart: if a position is already open, mark entered
+            if orb_position(symbol) is not None and not st["entered"]:
+                st["entered"] = True
+                print(f"{now} | existing ORB position found — reconciled")
+
+            # Daily loss kill-switch: halt (and flatten) if equity down too much
+            if not st["skipped"] and st["start_equity"]:
+                equity = get_account_info()["equity"]
+                dd_pct = (st["start_equity"] - equity) / st["start_equity"] * 100
+                if dd_pct >= MAX_DAILY_LOSS_PERCENT:
+                    print(f"{now} | daily loss {dd_pct:.2f}% >= {MAX_DAILY_LOSS_PERCENT}% — HALT day")
+                    close_orb(symbol)
+                    st["skipped"] = True
+                    st["closed"]  = True
 
             # 1) Build the opening range once the first candle has closed
             if st["range"] is None and now >= c2_open:
@@ -190,8 +215,9 @@ def run(symbol: str):
                         st["direction"] = "SHORT" if broke_high else "LONG"
                         print(f"{now} | {st['direction']} bias set")
 
-            # 3) Wait for opposite-side breach → enter (once)
-            if st["direction"] and not st["entered"] and not st["skipped"] and c2_end <= now < exit_dt:
+            # 3) Wait for opposite-side breach → enter (once, and only if flat)
+            if (st["direction"] and not st["entered"] and not st["skipped"]
+                    and c2_end <= now < exit_dt and orb_position(symbol) is None):
                 rh, rl = st["range"]
                 mid = (rh + rl) / 2
                 tick = mt5.symbol_info_tick(symbol)
