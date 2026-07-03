@@ -1,0 +1,226 @@
+"""
+Live bot — Opening-Range Failed-Breakout Reversal (NDX100).
+
+Daily flow (broker time), mirrors backtest_orb.py:
+  1. First 15-min candle after US open (16:30) = opening range.
+  2. 2nd 15-min candle (16:45) must break ONE side:
+       high only  -> SHORT bias   |   low only -> LONG bias
+       both/neither -> skip the day
+  3. Enter (market) when the OPPOSITE side is breached:
+       SHORT: sell when price <= range_low
+       LONG : buy  when price >= range_high
+  4. SL = midpoint of the range (half-range stop). No TP.
+  5. Exit: flat at ORB_EXIT_TIME (22:55) or SL — one trade per day.
+
+Run on the Windows server with MT5 open & logged in:
+    python bot_orb.py            # NDX100
+    python bot_orb.py NDX100
+"""
+
+import sys
+import time
+from datetime import datetime, timedelta
+
+import MetaTrader5 as mt5
+import pandas as pd
+
+from config import US_OPEN_TIME, ORB_EXIT_TIME, ORB_RANGE_MINUTES
+from execution_bot import connect, disconnect, calculate_lot_size
+
+MAGIC     = 26073
+POLL_SEC  = 15
+
+
+def _t(hhmm: str) -> timedelta:
+    h, m = hhmm.split(":")
+    return timedelta(hours=int(h), minutes=int(m))
+
+
+def broker_now(symbol: str) -> datetime | None:
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        return None
+    return datetime.utcfromtimestamp(tick.time)   # MT5 epoch = broker wall time
+
+
+def get_m15_bar(symbol: str, bar_open: datetime):
+    """Return the completed M15 bar whose open == bar_open, or None."""
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 200)
+    if rates is None or len(rates) == 0:
+        return None
+    df = pd.DataFrame(rates)
+    df["time"] = pd.to_datetime(df["time"], unit="s")
+    row = df[df["time"] == pd.Timestamp(bar_open)]
+    return None if row.empty else row.iloc[0]
+
+
+def orb_position(symbol: str):
+    positions = mt5.positions_get(symbol=symbol)
+    if not positions:
+        return None
+    for p in positions:
+        if p.magic == MAGIC:
+            return p
+    return None
+
+
+def place_market(symbol: str, direction: str, sl_price: float) -> bool:
+    if not mt5.symbol_select(symbol, True):
+        print(f"  ! could not select {symbol}")
+        return False
+    tick = mt5.symbol_info_tick(symbol)
+    info = mt5.symbol_info(symbol)
+    if tick is None or info is None:
+        return False
+
+    if direction == "SHORT":
+        order_type, price = mt5.ORDER_TYPE_SELL, tick.bid
+    else:
+        order_type, price = mt5.ORDER_TYPE_BUY, tick.ask
+
+    sl_points = abs(price - sl_price) / info.point
+    lot = calculate_lot_size(symbol, sl_points)
+    if lot == 0:
+        print("  ! lot size 0 — skipping")
+        return False
+
+    request = {
+        "action":       mt5.TRADE_ACTION_DEAL,
+        "symbol":       symbol,
+        "volume":       lot,
+        "type":         order_type,
+        "price":        price,
+        "sl":           sl_price,
+        "tp":           0.0,            # no TP — time-based exit
+        "deviation":    20,
+        "magic":        MAGIC,
+        "comment":      "ORB reversal",
+        "type_time":    mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    r = mt5.order_send(request)
+    if r.retcode == mt5.TRADE_RETCODE_DONE:
+        print(f"  ✅ {direction} filled @ {r.price} | SL {sl_price} | lot {lot} | #{r.order}")
+        return True
+    print(f"  ❌ order failed retcode={r.retcode} {r.comment}")
+    return False
+
+
+def close_orb(symbol: str):
+    pos = orb_position(symbol)
+    if pos is None:
+        return
+    tick = mt5.symbol_info_tick(symbol)
+    if pos.type == mt5.ORDER_TYPE_BUY:
+        otype, price = mt5.ORDER_TYPE_SELL, tick.bid
+    else:
+        otype, price = mt5.ORDER_TYPE_BUY, tick.ask
+    r = mt5.order_send({
+        "action":   mt5.TRADE_ACTION_DEAL,
+        "symbol":   symbol,
+        "volume":   pos.volume,
+        "type":     otype,
+        "position": pos.ticket,
+        "price":    price,
+        "deviation":20,
+        "magic":    MAGIC,
+        "comment":  "ORB EOD exit",
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    })
+    print(f"  ⏱ EOD close #{pos.ticket} @ {price} | P&L ${pos.profit:.2f} | retcode {r.retcode}")
+
+
+def run(symbol: str):
+    print("\n" + "=" * 55)
+    print(f"  ORB Reversal Live Bot — {symbol}")
+    print("=" * 55)
+    if not connect():
+        return
+
+    open_off = _t(US_OPEN_TIME)
+    rng_len  = timedelta(minutes=ORB_RANGE_MINUTES)
+    exit_off = _t(ORB_EXIT_TIME)
+
+    day_state = {"date": None}
+
+    def reset(d):
+        day_state.clear()
+        day_state.update({
+            "date": d, "range": None, "direction": None,
+            "entered": False, "skipped": False, "closed": False,
+        })
+
+    print(f"\nPolling every {POLL_SEC}s. US open {US_OPEN_TIME}, exit {ORB_EXIT_TIME} (broker time).\n")
+
+    while True:
+        try:
+            now = broker_now(symbol)
+            if now is None:
+                time.sleep(POLL_SEC); continue
+
+            today   = now.normalize() if isinstance(now, pd.Timestamp) else datetime(now.year, now.month, now.day)
+            open_dt = today + open_off
+            c2_open = open_dt + rng_len
+            c2_end  = c2_open + rng_len
+            exit_dt = today + exit_off
+
+            if day_state["date"] != today.date():
+                reset(today.date())
+
+            st = day_state
+
+            # 1) Build the opening range once the first candle has closed
+            if st["range"] is None and now >= c2_open:
+                bar = get_m15_bar(symbol, open_dt)
+                if bar is not None:
+                    st["range"] = (float(bar["high"]), float(bar["low"]))
+                    print(f"{now} | range HIGH {st['range'][0]} LOW {st['range'][1]}")
+
+            # 2) After 2nd candle closes, decide direction
+            if st["range"] and st["direction"] is None and not st["skipped"] and now >= c2_end:
+                bar2 = get_m15_bar(symbol, c2_open)
+                if bar2 is not None:
+                    rh, rl = st["range"]
+                    broke_high = float(bar2["high"]) > rh
+                    broke_low  = float(bar2["low"])  < rl
+                    if broke_high == broke_low:
+                        st["skipped"] = True
+                        print(f"{now} | both/neither broken → skip day")
+                    else:
+                        st["direction"] = "SHORT" if broke_high else "LONG"
+                        print(f"{now} | {st['direction']} bias set")
+
+            # 3) Wait for opposite-side breach → enter (once)
+            if st["direction"] and not st["entered"] and not st["skipped"] and c2_end <= now < exit_dt:
+                rh, rl = st["range"]
+                mid = (rh + rl) / 2
+                tick = mt5.symbol_info_tick(symbol)
+                if tick:
+                    if st["direction"] == "SHORT" and tick.bid <= rl:
+                        if place_market(symbol, "SHORT", mid):
+                            st["entered"] = True
+                    elif st["direction"] == "LONG" and tick.ask >= rh:
+                        if place_market(symbol, "LONG", mid):
+                            st["entered"] = True
+
+            # 4) Flat at exit time
+            if now >= exit_dt and not st["closed"]:
+                close_orb(symbol)
+                st["closed"] = True
+
+            time.sleep(POLL_SEC)
+
+        except KeyboardInterrupt:
+            print("\nStopping bot...")
+            break
+        except Exception as e:
+            print(f"loop error: {e}")
+            time.sleep(POLL_SEC)
+
+    disconnect()
+    print("Bot stopped.")
+
+
+if __name__ == "__main__":
+    symbol = sys.argv[1] if len(sys.argv) > 1 else "NDX100"
+    run(symbol)
