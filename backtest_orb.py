@@ -82,8 +82,9 @@ def run_orb(symbol: str, m5: pd.DataFrame) -> list[dict]:
             continue  # opposite side never breached → no trade
 
         # ── Simulate: SL hit or time-based exit at ORB_EXIT_TIME ──
-        # Include the entry candle: a single wide bar can breach entry AND SL.
-        fwd = day_df[(day_df["time"] >= entry_time) & (day_df["time"] <= exit_dt)]
+        # Check stop only from the NEXT candle after entry (entry candle's high
+        # occurred before the entry breach, so it can't be the stop).
+        fwd = day_df[(day_df["time"] > entry_time) & (day_df["time"] <= exit_dt)]
         result = "EOD"
         exit_price = None
         exit_time  = None
