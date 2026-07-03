@@ -144,12 +144,24 @@ if __name__ == "__main__":
     print(f"M5 candles: {len(m5)}")
     print(f"Running opening-range reversal backtest...\n")
 
+    print(f"Data span : {m5['time'].min()}  →  {m5['time'].max()}")
+
     trades = run_orb(symbol, m5)
     stats  = compute_stats(trades)
 
     if not stats:
         print("No trades found.")
         sys.exit(0)
+
+    # Per-year breakdown
+    tdf = pd.DataFrame(trades)
+    tdf["year"] = pd.to_datetime(tdf["entry_time"]).dt.year
+    print("\nPer-year:")
+    for yr, g in tdf.groupby("year"):
+        w  = (g["pnl_usd"] > 0).sum()
+        pf = g[g.pnl_usd > 0].pnl_usd.sum() / abs(g[g.pnl_usd <= 0].pnl_usd.sum()) if (g.pnl_usd <= 0).any() else float("inf")
+        print(f"  {yr} | trades {len(g):3d} | WR {round(w/len(g)*100,1):5}% | PF {round(pf,2):5} | P&L ${round(g.pnl_usd.sum(),2):8}")
+    print()
 
     longs  = sum(1 for t in trades if t["h1_rsi"] == "LONG")
     shorts = len(trades) - longs
