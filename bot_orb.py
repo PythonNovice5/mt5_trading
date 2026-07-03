@@ -94,6 +94,14 @@ def orb_position(symbol: str):
     return None
 
 
+def traded_today(symbol: str, day_start: datetime) -> bool:
+    """True if an ORB deal for this symbol already happened today (survives restart)."""
+    deals = mt5.history_deals_get(day_start, day_start + timedelta(days=1))
+    if not deals:
+        return False
+    return any(d.magic == MAGIC and d.symbol == symbol for d in deals)
+
+
 def place_market(symbol: str, direction: str, sl_price: float) -> bool:
     if not mt5.symbol_select(symbol, True):
         log(f"  ! could not select {symbol}")
@@ -227,10 +235,15 @@ def run(symbol: str):
 
             st = day_state
 
-            # Reconcile after a restart: if a position is already open, mark entered
-            if orb_position(symbol) is not None and not st["entered"]:
-                st["entered"] = True
-                log(f"{now} | existing ORB position found - reconciled")
+            # Reconcile after a restart (survives a kill/restart mid-day)
+            if not st["entered"]:
+                if orb_position(symbol) is not None:
+                    st["entered"] = True
+                    log(f"{now} | existing ORB position found - reconciled")
+                elif traded_today(symbol, today):
+                    st["entered"] = True
+                    st["closed"]  = True
+                    log(f"{now} | already traded today - no re-entry")
 
             # Daily loss kill-switch: halt (and flatten) if equity down too much
             if not st["skipped"] and st["start_equity"]:
