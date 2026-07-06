@@ -282,7 +282,9 @@ def run(symbol: str):
                         log(f"{now} | both/neither broken -> skip day")
                     else:
                         st["direction"] = "SHORT" if broke_high else "LONG"
-                        log(f"{now} | {st['direction']} bias set")
+                        mid       = round((rh + rl) / 2, 2)
+                        entry_lvl = rl if broke_high else rh
+                        log(f"{now} | {st['direction']} bias set | entry {entry_lvl} | SL {mid}")
 
             # 3) Wait for opposite-side breach -> enter (once, and only if flat)
             if (st["direction"] and not st["entered"] and not st["skipped"]
