@@ -33,7 +33,7 @@ from execution_bot import (
 )
 
 MAGIC     = 26073
-POLL_SEC  = 15
+POLL_SEC  = 1
 
 # ── LOGGER (console + logs/orb_bot.log) ──
 os.makedirs("logs", exist_ok=True)
