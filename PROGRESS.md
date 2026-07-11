@@ -2,8 +2,79 @@
 
 ## What This Project Is
 
-A **semi-automated + algorithmic trading bot** for prop-firm accounts (FundingPips) using MetaTrader 5 (MT5) + Python.
-Target instruments: Major Forex pairs (EURUSD, GBPUSD, AUDUSD, USDCAD, USDCHF, USDJPY, AUDCAD).
+An **automated algorithmic trading bot** running live on a FundingPips MT5 account
+($5,000). The active strategy is an **Opening-Range Failed-Breakout Reversal on
+NDX100**, fully self-deploying on an AWS Windows server (starts itself, trades one
+session, emails at each step, and powers itself off).
+
+> An earlier RSI mean-reversion strategy (Forex, long-only) was built first and
+> shelved — those files are kept but are **legacy** (see bottom).
+
+---
+
+## Active Strategy — ORB Reversal (NDX100)
+
+Per day, all in **broker time** (US open = 16:30 broker = 9:30 ET, DST-aligned):
+
+1. **Opening range** = first 15-min candle after the open (16:30–16:45).
+2. **Break candle** = the next 15-min candle (16:45–17:00) must break **one** side:
+   - breaks the **high** only → **SHORT** bias
+   - breaks the **low** only → **LONG** bias
+   - breaks **both / neither** → skip the day
+3. **Entry (reversal)** on the *opposite* side breaching:
+   - SHORT: sell when price trades below the range low
+   - LONG: buy when price trades above the range high
+4. **SL** = the range **midpoint** (half-range stop). No fixed TP.
+5. **Exit** = force-flat at **22:55** broker (5 min before US close) or SL, whichever first.
+6. **One trade per day**, both directions.
+
+### Backtest (NDX100 M15, ~4.5 years, 2022–2026)
+| Metric | Value |
+|---|---|
+| Profit factor | **1.51** |
+| Total P&L | ~+$1,948 (at $12.50/R) |
+| Win rate | 30.5% (low-WR / high-R by design) |
+| Max drawdown | $170 |
+| Consistency | all 5 years net positive (2022 ~breakeven) |
+
+Half-range SL (vs full range) roughly 2.5×'d total P&L and made every year green.
+
+---
+
+## Live Config (`config.py`)
+```python
+US_OPEN_TIME      = "16:30"   # broker time of 9:30 ET (volume-confirmed, DST-aligned)
+ORB_EXIT_TIME     = "22:55"   # 5 min before US close
+ORB_RANGE_MINUTES = 15
+MT5_TERMINAL_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+# risk lives in execution_bot.py:
+RISK_PERCENT           = 0.8   # $40 per trade on $5,000
+MAX_DAILY_LOSS_PERCENT = 4.0   # kill-switch
+```
+Risk is **$40/trade** (0.8%), auto-sized to each day's stop distance.
+
+---
+
+## Deployment / Automation (AWS)
+
+Fully hands-off daily loop:
+```
+EventBridge Scheduler (9:00 AM America/New_York, Mon–Fri)
+  → starts EC2 instance                              [email: machine started]
+    → Windows auto-logon → Startup runs run_orb.bat
+      → launch_orb.py launches + verifies MT5         [email: MT5 launched]
+        → runs bot_orb.py in-process (auto-shutdown)  [email: bot launched]
+          → bot trades the session
+            → powers off when day resolves            [email: shutting down]
+```
+- **Emails** via AWS SNS (topic `orb-bot-alerts` → egarg0587@gmail.com).
+- **Shutdown** is event-driven: skip-day (17:00), SL hit, or 22:55 EOD; plus a
+  **21:45 UTC wall-clock backstop** for market holidays / dead sessions.
+- **DST**: broker clock tracks NY (open stays 16:30 year-round → bot is auto-correct);
+  EventBridge uses `America/New_York` timezone so the start also tracks DST.
+- **Restart-safe**: reconciles an open position; a state flag
+  (`logs/orb_last_trade.txt`) blocks a second trade the same day.
+- Full setup steps in **`AUTOSTART.md`**.
 
 ---
 
@@ -11,91 +82,40 @@ Target instruments: Major Forex pairs (EURUSD, GBPUSD, AUDUSD, USDCAD, USDCHF, U
 
 | File | Purpose |
 |------|---------|
-| `config.py` | All settings in one place — pairs, risk, RSI, swing lookback, RR targets |
-| `indicators.py` | RSI(14), swing high/low detection (3 candles each side) |
-| `strategy.py` | 1H setup scanner + 5min entry signal detector |
-| `bot.py` | Main 24/7 loop — scans every 60s, places trades, logs everything |
-| `backtest.py` | Backtester using downloaded CSVs — simulates full strategy |
-| `report.py` | Generates HTML report from backtest results |
-| `execution_bot.py` | Original bot — reused: `connect`, `disconnect`, `get_account_info` |
-| `download_data_claud.py` | Downloads OHLCV data from MT5 to CSV (reused for backtest) |
-| `download_data.py` | Original basic downloader |
+| `config.py` | Central settings (ORB times, MT5 path, risk, legacy RSI params) |
+| `backtest_orb.py` | ORB backtester (any timeframe; per-year breakdown) |
+| `bot_orb.py` | **Live ORB bot** — daily state machine, half-range SL, auto-shutdown |
+| `launch_orb.py` | Boot orchestrator — launches MT5 + bot, emails each step |
+| `run_orb.bat` | Startup-folder launcher (venv + `launch_orb.py`) |
+| `notify.py` | AWS SNS email helper |
+| `execution_bot.py` | Reused: `connect`, `calculate_lot_size`, risk/drawdown constants |
+| `report.py` | HTML backtest report (equity curve, trade log) |
+| `download_data_claud.py` | MT5 → CSV data downloader |
+| `AUTOSTART.md` | Full AWS + Windows deployment guide |
 
 ---
 
-## Strategy Logic
-
-**Setup (1H):**
-- Scan 7 forex pairs every new 1H candle
-- RSI(14) < 25 → record the LOW and the last swing high before it (SH1)
-- Setup active for next 3 hourly candles, then expires
-
-**Entry (5min):**
-- After setup: find absolute low on 5min
-- Confirm higher swing low forms (current > previous)
-- 5min candle closes ABOVE SH1 → entry signal
-- Entry = close of that candle
-- SL = low of entry candle − 1 pip buffer
-- TP = 1:5 RR or next swing high on 5min (whichever is further, minimum 1:3)
-
-**Risk:**
-- Fixed $12.50 per trade (0.25% of $5000 — adjustable in `config.py`)
-- Max 3 open trades simultaneously
-- Skip if spread > 20 pips
-- BUY only (long-only mean reversion)
-
----
-
-## What's Built (Done)
-
-- [x] `config.py` — central config
-- [x] `indicators.py` — RSI, swing high/low (3 candles each side)
-- [x] `strategy.py` — 1H setup + 5min entry logic with RR validation
-- [x] `bot.py` — main loop, trade execution, file logger, setup state manager, dedup guard
-- [x] `backtest.py` — full walk-forward backtest on CSV data
-- [x] `report.py` — HTML report with equity curve, trade log, per-symbol breakdown
-- [x] MT5 connection (reused from `execution_bot.py`)
-- [x] Historical data download (reused from `download_data_claud.py`)
-
----
-
-## What's NOT Built Yet
-
-- [ ] Trailing stop
-- [ ] Partial close / scale-out
-- [ ] Telegram / email alerts
-- [ ] Multi-symbol backtest in one run
-- [ ] Daily drawdown reset logic in live bot
-
----
-
-## Key Config (`config.py`)
-
-```python
-FIXED_RISK_USD    = 12.50   # $ risk per trade
-MAX_OPEN_TRADES   = 3
-MAX_SPREAD_PIPS   = 20
-RSI_OVERSOLD      = 25
-SETUP_EXPIRY_BARS = 3
-SWING_LOOKBACK    = 3       # candles each side for swing detection
-MIN_RR            = 3.0
-TARGET_RR         = 5.0
-```
-
----
-
-## How to Run
+## How to Run / Monitor
 
 ```bash
-# Live bot (MT5 must be open and logged in)
-python bot.py
+# Backtest (server, data downloaded first)
+python download_data_claud.py NDX100 M15 5
+python backtest_orb.py NDX100 5 M15
 
-# Download data for backtest
-python download_data_claud.py EURUSD H1 1
-python download_data_claud.py EURUSD M5 1
+# Live bot — manual (no auto-shutdown)
+python bot_orb.py NDX100
 
-# Run backtest + generate HTML report
-python backtest.py EURUSD H1 M5 1
+# Live bot — full boot flow (emails + auto-shutdown; what Startup runs)
+python launch_orb.py NDX100
+
+# Watch live
+tail -f logs/orb_bot.log
 ```
 
-Reports saved to `reports/`, logs to `logs/`.
+Deployed live on AWS as of **July 2026** — first automated session Mon 13 Jul 2026.
+
+---
+
+## Legacy (RSI mean-reversion, Forex) — shelved
+`indicators.py`, `strategy.py`, `bot.py`, `backtest.py` implement the original
+long-only RSI(14) < setup on 7 Forex pairs. Kept for reference; not deployed.
