@@ -31,6 +31,7 @@ from execution_bot import (
     connect, disconnect, calculate_lot_size, get_account_info,
     MAX_DAILY_LOSS_PERCENT,
 )
+from notify import notify
 
 MAGIC     = 26073
 POLL_SEC  = 1
@@ -182,7 +183,14 @@ def close_orb(symbol: str):
     log(f"  [EOD] EOD close #{pos.ticket} @ {price} | P&L ${pos.profit:.2f} | retcode {r.retcode}")
 
 
-def run(symbol: str):
+def shutdown_machine(reason: str, now):
+    """Email then power off the Windows box (event-driven cost saving)."""
+    log(f"{now} | day complete ({reason}) - shutting down machine")
+    notify("ORB: shutting down", f"{now} | day complete ({reason}). Powering off the server.")
+    os.system("shutdown /s /f /t 30")
+
+
+def run(symbol: str, auto_shutdown: bool = False):
     log("\n" + "=" * 55)
     log(f"  ORB Reversal Live Bot - {symbol}")
     log("=" * 55)
@@ -205,6 +213,7 @@ def run(symbol: str):
         day_state.update({
             "date": d, "range": None, "direction": None,
             "entered": False, "skipped": False, "closed": False,
+            "position_seen": False, "shutdown_done": False,
             "start_equity": get_account_info()["equity"],
         })
 
@@ -302,10 +311,27 @@ def run(symbol: str):
                             st["entered"] = True
                             mark_traded(today.date())
 
+            # Track that the position actually opened (guards SL-close detection)
+            if orb_position(symbol) is not None:
+                st["position_seen"] = True
+
             # 4) Flat at exit time
             if now >= exit_dt and not st["closed"]:
                 close_orb(symbol)
                 st["closed"] = True
+
+            # 5) Event-driven shutdown once the day's outcome is final
+            if auto_shutdown and not st["shutdown_done"]:
+                reason = None
+                if st["skipped"]:
+                    reason = "no setup / skip day"
+                elif st["entered"] and st["position_seen"] and orb_position(symbol) is None:
+                    reason = "trade closed (SL or target)"
+                elif now >= exit_dt:
+                    reason = "EOD close"
+                if reason:
+                    st["shutdown_done"] = True
+                    shutdown_machine(reason, now)
 
             time.sleep(POLL_SEC)
 
@@ -321,5 +347,7 @@ def run(symbol: str):
 
 
 if __name__ == "__main__":
-    symbol = sys.argv[1] if len(sys.argv) > 1 else "NDX100"
-    run(symbol)
+    args   = [a for a in sys.argv[1:] if not a.startswith("--")]
+    symbol = args[0] if args else "NDX100"
+    auto_shutdown = "--shutdown" in sys.argv   # only the orchestrator passes this
+    run(symbol, auto_shutdown=auto_shutdown)

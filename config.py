@@ -49,6 +49,9 @@ US_OPEN_TIME       = "16:30"  # Broker-time of US cash open (9:30 ET). Volume-co
 ORB_EXIT_TIME      = "22:55"  # Exit 5 min before US close (23:00 broker time)
 ORB_RANGE_MINUTES  = 15       # Length of the opening-range candle
 
+# ── DEPLOY / AUTO-START (AWS Windows server) ──
+MT5_TERMINAL_PATH  = r"C:\Program Files\FundingPips MT5\terminal64.exe"  # adjust to your install
+
 # ── TIMEFRAMES ──
 SETUP_TF           = "H1"    # Timeframe for RSI setup scan
 ENTRY_TF           = "M5"    # Timeframe for entry signal
