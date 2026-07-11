@@ -4,9 +4,10 @@ Boot orchestrator for the ORB live bot (runs on Windows startup via Task Schedul
 Sequence, with an email at each step:
   1. Machine started
   2. Launch + connect MT5 terminal   -> verify -> email
-  3. Launch bot_orb.py (auto-shutdown mode) -> verify alive -> email
+  3. Run the bot in-process (auto-shutdown mode) -> email
 
-The bot itself sends the 4th email (shutdown) when the trading day is done.
+The bot runs in THIS process (not a subprocess) so Task Scheduler keeps it
+alive for the whole session. The bot sends the 4th email (shutdown) at day end.
 
 Run:
     python launch_orb.py            # NDX100
@@ -17,7 +18,6 @@ import sys
 import os
 import time
 import logging
-import subprocess
 
 import MetaTrader5 as mt5
 
@@ -60,29 +60,6 @@ def launch_mt5() -> bool:
     return False
 
 
-def launch_bot(symbol: str) -> bool:
-    """Start the trading bot in auto-shutdown mode as a background process."""
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, "bot_orb.py", symbol, "--shutdown"],
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-        )
-    except Exception as e:
-        log(f"[FAIL] could not start bot: {e}")
-        notify("ORB: bot launch FAILED", f"could not start bot_orb.py: {e}")
-        return False
-
-    time.sleep(8)  # give it a moment to boot / crash
-    if proc.poll() is not None:
-        log(f"[FAIL] bot exited immediately (code {proc.returncode})")
-        notify("ORB: bot launch FAILED", f"bot_orb.py exited immediately (code {proc.returncode})")
-        return False
-
-    log(f"[OK] bot_orb.py running (pid {proc.pid})")
-    notify("ORB: bot launched", f"bot_orb.py started for {symbol} (pid {proc.pid}, auto-shutdown on).")
-    return True
-
-
 def main():
     symbol = sys.argv[1] if len(sys.argv) > 1 else "NDX100"
 
@@ -92,13 +69,18 @@ def main():
     notify("ORB: machine started", f"AWS server booted; starting ORB stack for {symbol}.")
 
     if not launch_mt5():
-        log("Aborting — MT5 not available.")
-        return
-    if not launch_bot(symbol):
-        log("Aborting — bot did not start.")
+        log("Aborting - MT5 not available.")
         return
 
-    log("Boot sequence complete. Bot is now trading the session.")
+    # Run the bot IN THIS PROCESS so Task Scheduler keeps it alive all session.
+    notify("ORB: bot launched", f"Starting ORB bot for {symbol} (auto-shutdown on).")
+    log("[OK] starting bot in-process (auto-shutdown on)")
+    try:
+        from bot_orb import run
+        run(symbol, auto_shutdown=True)
+    except Exception as e:
+        log(f"[FAIL] bot crashed: {e}")
+        notify("ORB: bot CRASHED", f"bot exited with error: {e}")
 
 
 if __name__ == "__main__":
