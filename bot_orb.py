@@ -219,8 +219,9 @@ def run(symbol: str, auto_shutdown: bool = False):
 
     log(f"Polling every {POLL_SEC}s. US open {US_OPEN_TIME}, exit {ORB_EXIT_TIME} (broker time).")
 
-    last_hb_wall = 0.0
-    last_tick_t  = None
+    last_hb_wall  = 0.0
+    last_tick_t   = None
+    backstop_done = False
 
     while True:
         try:
@@ -237,6 +238,14 @@ def run(symbol: str, auto_shutdown: bool = False):
                            if stt.get("date") else "no active day")
                 log(f"heartbeat | market={'OPEN' if live else 'CLOSED'} | broker_now={now} | {summary}")
                 last_hb_wall = time.time()
+
+            # Wall-clock backstop: guarantee power-off after the US close even if the
+            # market never went live (holiday / dead session). 21:45 UTC is safely
+            # past the US close in both EDT (20:00) and EST (21:00).
+            utcnow = datetime.utcnow()
+            if auto_shutdown and not backstop_done and (utcnow.hour, utcnow.minute) >= (21, 45):
+                backstop_done = True
+                shutdown_machine("wall-clock backstop (no live session / holiday)", utcnow)
 
             if not live:
                 time.sleep(POLL_SEC); continue   # market not ticking → wait
