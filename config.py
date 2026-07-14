@@ -48,7 +48,6 @@ RECT_MAX_RANGE_PCT = 0.001   # Max range as % of price (0.1%)
 US_OPEN_TIME       = "16:30"  # Broker-time of US cash open (9:30 ET). Volume-confirmed.
 ORB_EXIT_TIME      = "22:55"  # Exit 5 min before US close (23:00 broker time)
 ORB_RANGE_MINUTES  = 15       # Length of the opening-range candle
-ORB_BREAK_WINDOW_BARS = 1     # How many 15-min bars after the range may make the break (1 = classic 2nd candle only)
 
 # ── RSI EXTREME REVERSAL (EURGBP) ──
 RSI_REV_PERIOD     = 14      # H1 RSI period
