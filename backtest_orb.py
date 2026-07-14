@@ -21,7 +21,10 @@ Usage:
 import sys
 import pandas as pd
 
-from config import US_OPEN_TIME, ORB_EXIT_TIME, ORB_RANGE_MINUTES, FIXED_RISK_USD
+from config import (
+    US_OPEN_TIME, ORB_EXIT_TIME, ORB_RANGE_MINUTES, ORB_BREAK_WINDOW_BARS,
+    FIXED_RISK_USD,
+)
 from backtest import load_csv, compute_stats
 
 
@@ -43,33 +46,45 @@ def run_orb(symbol: str, m5: pd.DataFrame) -> list[dict]:
     for day, day_df in m5.groupby("date"):
         day_df = day_df.sort_values("time")
         open_dt   = day + open_off
-        c1_end    = open_dt + rng_len            # first candle window end
-        c2_end    = c1_end  + rng_len            # second candle window end
+        c1_end    = open_dt + rng_len            # opening-range candle end
         exit_dt   = day + exit_off
 
         c1 = day_df[(day_df["time"] >= open_dt) & (day_df["time"] < c1_end)]
-        c2 = day_df[(day_df["time"] >= c1_end)  & (day_df["time"] < c2_end)]
-        if len(c1) == 0 or len(c2) == 0:
-            continue  # incomplete session data (works for M5=3 candles or M15=1)
+        if len(c1) == 0:
+            continue  # no opening range
 
         range_high = c1["high"].max()
         range_low  = c1["low"].min()
 
-        broke_high = c2["high"].max() > range_high
-        broke_low  = c2["low"].min()  < range_low
+        # Scan the break window (N 15-min bars after the range) for the FIRST break.
+        # Same-bar break of both sides = ambiguous → skip that day.
+        direction  = None
+        break_end  = None
+        for k in range(ORB_BREAK_WINDOW_BARS):
+            w_start = c1_end + k * rng_len
+            w_end   = w_start + rng_len
+            bar = day_df[(day_df["time"] >= w_start) & (day_df["time"] < w_end)]
+            if len(bar) == 0:
+                continue
+            bh = bar["high"].max() > range_high
+            bl = bar["low"].min()  < range_low
+            if bh and bl:
+                direction = None; break          # both broke same bar → skip
+            if bh or bl:
+                direction = "SHORT" if bh else "LONG"
+                break_end = w_end
+                break
 
-        if broke_high == broke_low:
-            continue  # both or neither → skip
-
-        direction = "SHORT" if broke_high else "LONG"
+        if direction is None:
+            continue  # no clean one-side break within the window → skip
         sl_dist   = (range_high - range_low) / 2      # half of the opening range
         if sl_dist <= 0:
             continue
         # Entry is at the opposite range edge; SL sits half a range away (midpoint)
         sl_price  = (range_low + sl_dist) if direction == "SHORT" else (range_high - sl_dist)
 
-        # ── Look for reversal entry from after the 2nd candle to exit time ──
-        monitor = day_df[(day_df["time"] >= c2_end) & (day_df["time"] <= exit_dt)]
+        # ── Look for reversal entry from after the break bar to exit time ──
+        monitor = day_df[(day_df["time"] >= break_end) & (day_df["time"] <= exit_dt)]
         entry_price = entry_time = None
         for _, row in monitor.iterrows():
             if direction == "SHORT" and row["low"] <= range_low:
