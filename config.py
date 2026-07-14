@@ -57,6 +57,14 @@ RSI_REV_MIN_SL_PIPS = 10     # floor for the trigger-candle stop
 RSI_REV_TARGET_RR  = 5.0     # 1:5 target (try 3.0 / 2.0 to raise win rate)
 RSI_REV_CONFIRM    = True    # require trigger candle to CLOSE beyond prior candle's extreme
 
+# ── RSI FIXED-TARGET REVERSAL (EURGBP) ──
+# Enter immediately on the H1 RSI extreme; fixed SL/TP in points (1 point = 0.00001).
+RSI_FIX_PERIOD     = 14
+RSI_FIX_OB         = 90      # RSI > 90 → sell
+RSI_FIX_OS         = 10      # RSI < 10 → buy
+RSI_FIX_SL_POINTS  = 50      # stop  = 50 points  (5 pips)
+RSI_FIX_TP_POINTS  = 300     # target = 300 points (30 pips) → 1:6
+
 # ── DEPLOY / AUTO-START (AWS Windows server) ──
 MT5_TERMINAL_PATH  = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 
