@@ -54,7 +54,8 @@ RSI_REV_PERIOD     = 14      # H1 RSI period
 RSI_REV_OB         = 80      # overbought → arm SHORT
 RSI_REV_OS         = 20      # oversold → arm LONG
 RSI_REV_MIN_SL_PIPS = 10     # floor for the trigger-candle stop
-RSI_REV_TARGET_RR  = 5.0     # 1:5 target
+RSI_REV_TARGET_RR  = 5.0     # 1:5 target (try 3.0 / 2.0 to raise win rate)
+RSI_REV_CONFIRM    = True    # require trigger candle to CLOSE beyond prior candle's extreme
 
 # ── DEPLOY / AUTO-START (AWS Windows server) ──
 MT5_TERMINAL_PATH  = r"C:\Program Files\MetaTrader 5\terminal64.exe"

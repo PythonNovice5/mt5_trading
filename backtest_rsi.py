@@ -19,7 +19,7 @@ import pandas as pd
 
 from config import (
     RSI_REV_PERIOD, RSI_REV_OB, RSI_REV_OS,
-    RSI_REV_MIN_SL_PIPS, RSI_REV_TARGET_RR, FIXED_RISK_USD,
+    RSI_REV_MIN_SL_PIPS, RSI_REV_TARGET_RR, RSI_REV_CONFIRM, FIXED_RISK_USD,
 )
 from indicators import calculate_rsi
 from backtest import load_csv, compute_stats, pip_size, pips
@@ -71,6 +71,15 @@ def run_rsi(symbol: str, h1: pd.DataFrame, m5: pd.DataFrame) -> list[dict]:
             continue
         if direction == "LONG" and not is_green:
             continue
+
+        # Confirmation: trigger candle must CLOSE beyond the previous candle's
+        # extreme (a real break, not just a down/up tick) → higher-quality entries
+        if RSI_REV_CONFIRM and i > 0:
+            prev = m5.iloc[i - 1]
+            if direction == "SHORT" and not (c["close"] < prev["low"]):
+                continue
+            if direction == "LONG" and not (c["close"] > prev["high"]):
+                continue
 
         entry_price = c["close"]
         if direction == "SHORT":
