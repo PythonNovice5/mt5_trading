@@ -49,6 +49,13 @@ US_OPEN_TIME       = "16:30"  # Broker-time of US cash open (9:30 ET). Volume-co
 ORB_EXIT_TIME      = "22:55"  # Exit 5 min before US close (23:00 broker time)
 ORB_RANGE_MINUTES  = 15       # Length of the opening-range candle
 
+# ── RSI EXTREME REVERSAL (EURGBP) ──
+RSI_REV_PERIOD     = 14      # H1 RSI period
+RSI_REV_OB         = 80      # overbought → arm SHORT
+RSI_REV_OS         = 20      # oversold → arm LONG
+RSI_REV_MIN_SL_PIPS = 10     # floor for the trigger-candle stop
+RSI_REV_TARGET_RR  = 5.0     # 1:5 target
+
 # ── DEPLOY / AUTO-START (AWS Windows server) ──
 MT5_TERMINAL_PATH  = r"C:\Program Files\MetaTrader 5\terminal64.exe"
 
